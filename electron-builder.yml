@@ -1,0 +1,115 @@
+# ⚠️ 素材扫描路径 = 正式 assets/，禁止使用 assets* 通配（戊 C-89-S1① 条文）
+# 任何形如 "assets*" / "assets*/**" 的 glob 都会把 assets-gen/ 的白底未抠图帧卷进包体。
+# PLACEHOLDER 前缀文件一律不得进入发布包（戊 C-78-S1② 同规矩）。
+
+appId: com.dshpet.desktop
+productName: DSH Pet
+
+directories:
+  output: dist-pkg
+  buildResources: build
+
+# pnpm Junction 无法被 files 白名单穿透，用钩子把 @pet 包实体复制进包内
+afterPack: scripts/after-pack.cjs
+
+# 入口与根 package.json 的 main 一致
+# main: apps/desktop/electron/main.mjs
+
+# 白名单显式列出，禁止 "**/*" 兜底
+files:
+  - package.json
+  # ⚠️ 各包的 package.json 必须随包，否则 "type": "module" 丢失
+  # → dist/*.js 被 Node 当作 CommonJS → ESM 具名导入报 SyntaxError
+  - packages/*/package.json
+  - apps/desktop/package.json
+  - apps/desktop/electron/main.mjs
+  - apps/desktop/electron/preload.cjs
+  # ⚠️ 主进程同级模块用目录内通配，避免逐个维护时漏项。
+  #    2026-11-02 实事故：presence.mjs 及后续拆出的模块没进白名单，
+  #    打包后启动直接 ERR_MODULE_NOT_FOUND。
+  - apps/desktop/electron/*.mjs
+  - apps/desktop/electron/renderer/**
+  - apps/desktop/dist/**
+  # ⚠️ 托盘图标实际在 electron/assets/ 下。原来写的 apps/desktop/assets/tray.png
+  #    这条路径不存在 —— files 白名单静默跳过，afterPack 也不会复制，
+  #    结果是包内没有 assets 目录，main.mjs 的 Tray 创建时 icon.isEmpty() 直接 return，
+  #    托盘根本没有、用户没有退出入口。改成通配整目录，图标一起带上。
+  - apps/desktop/electron/assets/**
+  - packages/shared/dist/**
+  - packages/core/dist/**
+  - packages/ui/dist/**
+  - packages/vault/dist/**
+  - packages/memory/dist/**
+  # ⚠️ apps/desktop/dist 下 4 个文件使用 @pet/* 裸模块名：
+  #   hostAdapter.js → @pet/core      ipc.js → @pet/shared
+  #   remote/qqOfficialChannel.js → @pet/shared
+  #   windowShell.js → @pet/shared
+  # 源侧是 pnpm Junction，files 白名单无法穿透（已实测），
+  # 改由 afterPack 钩子复制到 apps/desktop/node_modules/@pet/<name>/
+  # 素材随包。路径固定 assets/（禁止 assets* 通配）。
+  # 实测口径：97 文件 / 4.23 MB（其中 assets/cyrene 71 文件 / 3.26 MB）。
+  # ⚠️ 用户导入的模型仍走 userData/models，优先级高于这里的默认素材。
+  - assets/**
+  # pnpm workspace 依赖由 afterPack 复制（见 scripts/after-pack.cjs）
+  # 这里不再重复放 node_modules/@pet/**，避免同一路径两个来源。
+  # 显式排除（防御性，即使白名单已经不含）
+  # ⚠️ YAML 中 "!" 开头的标量会被当作 tag，必须加引号
+  - '!assets-gen/**'
+  - '!tmp/**'
+  # ⚠️ Live2D 模型涉及版权，只允许用户导入到 userData/models，任何模型文件不得随包。
+  - '!**/*.moc3'
+  - '!**/*.model3.json'
+  - '!**/*.physics3.json'
+  - '!**/*.motion3.json'
+  # 旧自制素材已移到 assets-source/legacy-whale，只作参考，不随包。
+  - '!assets/whale-girl-*/**'
+  # 冒烟脚本只在源码 / 开发态用，不随发布包。
+  - '!apps/desktop/electron/*Smoke.mjs'
+  - '!**/PLACEHOLDER*'
+  - '!**/*.map'
+  - '!**/*.log'
+  - '!**/*.tsbuildinfo'
+  # 声明层剔除：只服务构建工具链，运行时不 require。
+  # gh-pages 是 pixi-live2d-display 上游写进 dependencies 的，源码运行时不加载。
+  - '!**/node_modules/lodash/**'
+  - '!**/node_modules/gh-pages/**'
+  - '!**/node_modules/qs/**'
+  - '!**/node_modules/fs-extra/**'
+  - '!**/node_modules/async/**'
+
+# 首包关掉 asar：包内容必须能被直接检查，确认素材没被误卷、确认 dist 结构
+# 能看见优先于体积小。包型定了之后再评估开启。
+# 内测阶段保持 false 是有意识的选择，不是遗漏：asar: true 需要先跑通
+# afterPack / pet-media 协议 / 素材扫描在包内的路径行为，不能盲切。
+asar: false
+
+# 不做自动更新：运行时不依赖 electron-updater，留着发布配置只会生孩子
+# latest.yml / app-update.yml 这类没人读的元数据。
+publish: null
+
+win:
+  # 卸载项里的「发布者」在 electron-builder 26 取自 package.json 的 author /
+  # companyName；win.publisherName 已经不存在于 schema，写了会直接构建失败。
+  target:
+    - target: dir
+    - target: nsis
+      arch:
+        - x64
+  # 256x256 PNG，改用 Cyrene 本体自绘预设（来源见 assets/ATTRIBUTION.md）。
+  # 旧值 apps/desktop/electron/assets/icon.png 是早期从立绘裁的图，保留作回退。
+  icon: assets/cyrene/icons/app-cyrene.png
+
+# 内测包用 NSIS：可选安装目录、卸载不删数据（用户记忆和素材在里面）。
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: DSH Pet
+  deleteAppDataOnUninstall: false
+  artifactName: ${productName} Setup ${version}.${ext}
+
+# 首包不签名
+forceCodeSigning: false

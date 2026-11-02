@@ -1,0 +1,79 @@
+name: ci
+
+# 目的：主目标平台是 Windows 10/11，开发环境是 Linux 系工具链。
+# 两个平台各有各的盲区：Linux 抓不到盘符 / 大小写不敏感 / 路径分隔符；
+# Windows 抓不到 POSIX 权限位、符号链接与大小写敏感文件系统语义。
+# 任一平台缺席都会漏掉另一类差异，所以两个 runner 都要在。
+#
+# 本轮三次事故（CSP 17.2.38 / 路径分隔符 17.2.44 / Live2D 大小写 17.2.45）
+# 均属于这一族。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      # 一个平台红了不要取消另一个 —— 需要同时看到两边结果。
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    env:
+      # CI 上没有本机真值（用户名 / 工作区目录名），属预期降级。
+      # 不设的话 sanitize-check 会 exit 2，把「没配真值」误报成「检出泄漏」。
+      # 不复制 example 伪造 local：伪造出来的 local 会让降级判定失效（见 17.2.64）。
+      DEGRADED_OK: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 统一用 bash：Windows runner 默认是 PowerShell，`&&`、`$VAR` 会失效。
+      - name: Show environment
+        shell: bash
+        run: |
+          echo "OS: $RUNNER_OS"
+          echo "Shell: $SHELL"
+          node -v
+          uname -a 2>/dev/null || ver
+
+      # pnpm 必须单独装：setup-node 不自带（npm ci 在这里是错的 —— 见勘误 E13）
+      # 版本跟 package.json 的 packageManager 保持一致，写 9 会冲突。
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.28.5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee install.log
+          if grep -q 'ERR_PNPM_IGNORED_BUILDS' install.log; then
+            echo '::error::pnpm reported ignored build scripts; declare them in onlyBuiltDependencies'
+            exit 1
+          fi
+
+      - name: Test (full)
+        run: pnpm test
+
+      # verify.mjs 读 dist 产物，必须先 build + typecheck。
+      # `pnpm verify` = build && typecheck && node scripts/verify.mjs。
+      - name: Verify gates
+        run: pnpm verify
+
+      # 独立跑一次，便于从日志里单独看出脱敏结果（不被 verify 的汇总吞掉）
+      - name: Sanitize check
+        run: node scripts/sanitize-check.mjs .
+
+  # 说明：CI 无 GUI，Electron 真机渲染验证仍需本地执行（登记 17.4）。
+  # 不得用本 job 通过冒充真机验证 —— CI 抓「文件系统 / 运行时差异」，真机抓「渲染链路」。

@@ -1,0 +1,45 @@
+node_modules/
+dist/
+# 所有 dist-* 构建/打包输出（dist-verify、dist-nsis-verify、dist-pkg…）都不入库
+dist-*/
+*.log
+*.tsbuildinfo
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# 脱敏真值（本机配置，不入库；仓库只留 example）
+scripts/sanitize-rules.local.mjs
+
+# 本机运行时上下文（真值只留本地，仓库用 example）
+docs/RUNTIME-CONTEXT.md
+!docs/RUNTIME-CONTEXT.example.md
+
+# 真机现场证据
+**/s2-csp-evidence/
+
+# 简报运行标记（只在本机有意义）
+docs/brief/*.sent
+
+# 打包产物（含 builder-debug.yml 等本机绝对路径，不入库）
+dist-pkg/
+dist-pkg-debug/
+dist-pkg-build.log
+# 调试通道的临时配置（package.mjs 生成后即删）
+electron-builder.debug.yml
+
+# 手工备份（脚本临时生成，不入库）
+*.bak
+*.bak-*
+# 素材原图备份（optimize-assets --apply 生成）
+assets/.bak/
+
+# 开发期临时目录（解压出来的模型 60MB+，按授权也不能入库）
+tmp/
+
+# 调试脚本与截图（CDP 探针产物，只在本机用）
+.scratch/
+
+# Live2D Cubism Core 是官方专有软件，只做本地放置
+apps/desktop/electron/renderer/vendor/live2dcubismcore.min.js

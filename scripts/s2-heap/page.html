@@ -1,0 +1,183 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>S2 heap probe</title></head>
+<body>
+<!-- 活性锚点：如果 stage 仍是默认 300x150、status 不变，说明脚本根本没执行。 -->
+<canvas id="stage" width="200" height="200"></canvas>
+<div id="media-status">idle</div>
+<script>
+// S2 堆快照探针：页面只负责「跑一轮切换」，采样交给主进程的 CDP。
+// performance.memory 在 Electron 渲染进程里返回量化的粗粒度桶（实测恒定 10000000），
+// 不能用来判趋势；global.gc 单独调用不一定报错，但生效与否必须用堆是否下降来验。
+const PNG_1PX =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+const GIF_1PX = 'R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
+
+const stage = document.getElementById('stage');
+const statusEl = document.getElementById('media-status');
+let statusUpdates = 0;
+
+function markStatus(text) {
+  statusEl.textContent = text;
+  statusUpdates += 1;
+}
+
+function blobFromBase64(b64, mime) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function makeVideoBlob() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 2;
+  canvas.height = 2;
+  const ctx = canvas.getContext('2d');
+  const stream = canvas.captureStream(10);
+  const recorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp8' });
+  const chunks = [];
+  recorder.ondataavailable = (event) => {
+    if (event.data.size > 0) chunks.push(event.data);
+  };
+  const stopped = new Promise((resolve) => {
+    recorder.onstop = resolve;
+  });
+  recorder.start();
+  for (let i = 0; i < 3; i += 1) {
+    ctx.fillStyle = i % 2 === 0 ? '#fff' : '#000';
+    ctx.fillRect(0, 0, 2, 2);
+    await wait(40);
+  }
+  recorder.stop();
+  await stopped;
+  return new Blob(chunks, { type: 'video/webm' });
+}
+
+async function oneImageRound(blob) {
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+  const loaded = new Promise((resolve) => {
+    img.onload = resolve;
+    img.onerror = resolve;
+  });
+  img.src = url;
+  await loaded;
+  stage.appendChild(img);
+  img.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function oneVideoRound(blob) {
+  const url = URL.createObjectURL(blob);
+  const video = document.createElement('video');
+  video.muted = true;
+  video.src = url;
+  stage.appendChild(video);
+  await video.play().catch(() => {});
+  await wait(30);
+  video.pause();
+  video.removeAttribute('src');
+  video.load();
+  video.remove();
+  URL.revokeObjectURL(url);
+}
+
+// 没有真实 Live2D 模型资源时，用同体积的 RGBA 缓冲模拟纹理；
+// 只验证「dispose 后引用可被回收」，不冒充真实模型渲染。
+function makeFakeLive2D() {
+  return {
+    texture: new Uint8Array(512 * 512 * 4),
+    tick() {},
+    destroy() {
+      this.texture = null;
+    }
+  };
+}
+
+async function oneLive2DRound() {
+  const model = makeFakeLive2D();
+  model.tick();
+  model.destroy();
+}
+
+window.runOneRound = async function runOneRound(kind, round) {
+  markStatus(kind + ':' + round);
+  if (kind === 'image') await oneImageRound(blobFromBase64(PNG_1PX, 'image/png'));
+  else if (kind === 'gif') await oneImageRound(blobFromBase64(GIF_1PX, 'image/gif'));
+  else if (kind === 'video') await oneVideoRound(await makeVideoBlob());
+  else if (kind === 'live2d') await oneLive2DRound();
+  else throw new Error('unknown kind: ' + kind);
+};
+
+// 活性检查：主进程据此确认渲染侧真的在跑。
+window.getProbeState = function getProbeState() {
+  return {
+    stage: {
+      width: stage.width,
+      height: stage.height,
+      clientWidth: stage.clientWidth,
+      clientHeight: stage.clientHeight
+    },
+    status: statusEl.textContent,
+    statusUpdates,
+    hasGc: typeof globalThis.gc === 'function',
+    hasPerformanceMemory: typeof performance !== 'undefined' && performance.memory !== undefined
+  };
+};
+
+// 旧路径对照：按 17.2.67 的步骤，确认 --expose-gc 是否真的可用。
+// 只跑 5 次，够拿到结论；不进入正式采样。
+window.legacyProbe = async function legacyProbe() {
+  const result = { hasGc: typeof globalThis.gc === 'function', gcError: null, memoryValues: [] };
+  for (let i = 0; i < 5; i += 1) {
+    try {
+      globalThis.gc();
+      result.memoryValues.push(
+        performance.memory === undefined ? null : performance.memory.usedJSHeapSize
+      );
+    } catch (error) {
+      result.gcError = String((error && error.message) || error);
+      break;
+    }
+  }
+  return result;
+};
+
+// 自检用：故意每轮扣住一块内存不释放，用来证明判据能判出线性增长。
+// 不用 Uint8Array：ArrayBuffer 算外部内存，Runtime.getHeapUsage 只统计 JS 堆。
+// 也不用 'x'.repeat(n)：实测生成的字符串不计入 usedSize，造不出可见增长。
+const leakSink = [];
+window.runLeakyRound = async function runLeakyRound() {
+  // 8192 个 SMI 约 64KB，每轮 fill 不同的值，避免任何形式的内容复用。
+  leakSink.push({ ballast: new Array(8192).fill(leakSink.length) });
+};
+
+// GC 有效性验证：分配一块大字符串后立刻丢掉引用。
+// 主进程在 GC 前后各读一次堆，下降才算 GC 真的生效。
+window.allocateGarbage = function allocateGarbage(bytes) {
+  const junk = 'g'.repeat(bytes);
+  return junk.length;
+};
+
+// 自检 B：模拟「忘了 revoke」。前 10 轮一次大分配，之后每轮只漏几百字节。
+// 这个形状正是旧判据的盲区：后段涨幅远低于前段一半，会被放过。
+const unrevokedSink = [];
+let unrevokedCount = 0;
+window.runUnrevokedRound = function runUnrevokedRound() {
+  unrevokedCount += 1;
+  const blob = new Blob([new Uint8Array(64)], { type: 'image/png' });
+  const url = URL.createObjectURL(blob);
+  // 前 10 轮模拟一次性大分配（暖缓存），之后每轮只漏一点。
+  // 用数组造内存：字符串会被 V8 优化，实测不进 usedSize。
+  const ballast = unrevokedCount <= 10 ? new Array(2048).fill(unrevokedCount) : null;
+  // 故意不 revoke，引用也留在数组里。
+  unrevokedSink.push({ url, ballast, payload: 'u'.repeat(400) + unrevokedCount });
+};
+</script>
+</body>
+</html>

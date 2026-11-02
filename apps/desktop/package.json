@@ -1,0 +1,18 @@
+{
+  "name": "@pet/desktop",
+  "version": "2.0.0-dev.0",
+  "private": true,
+  "type": "module",
+  "description": "桌面薄壳：窗口、托盘、位置持久化与 HostAdapter 接线。运行时不直接依赖 Electron 类型",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "node ../../scripts/clean-dist.mjs dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@pet/core": "workspace:*",
+    "@pet/shared": "workspace:*",
+    "@pet/vault": "workspace:*"
+  }
+}

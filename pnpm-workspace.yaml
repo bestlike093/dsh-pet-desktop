@@ -1,0 +1,9 @@
+packages:
+  - 'packages/*'
+  - '!packages/agent-dsh'
+  - 'apps/*'
+allowBuilds:
+  electron: true
+  # electron-winstaller 的 install 脚本只读本地缓存，不下载远程二进制。
+  # 显式放行以消除 ERR_PNPM_IGNORED_BUILDS；CI 会把该错误提成失败断言。
+  electron-winstaller: true

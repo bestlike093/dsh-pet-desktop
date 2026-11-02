@@ -1,0 +1,58 @@
+{
+  "name": "desktop-pet",
+  "version": "2.0.0-dev.0",
+  "private": true,
+  "description": "通用多模态桌宠框架：模型无关渲染 + 可插拔模块 + 本地加密记忆（跨端同步走本机目录）",
+  "author": "bestlike093",
+  "license": "MIT",
+  "packageManager": "pnpm@11.28.5",
+  "main": "apps/desktop/electron/main.mjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis --x64 --publish never",
+    "dist:dir": "electron-builder --win dir --x64 --publish never",
+    "typecheck": "pnpm -r run typecheck",
+    "build": "pnpm -r run build",
+    "test": "vitest run",
+    "verify": "pnpm -r run build && pnpm -r run typecheck && pnpm test && node scripts/check-electron-syntax.mjs && node scripts/check-assets-license.mjs && node scripts/check-third-party.mjs && node scripts/check-ipc-contract.mjs && node scripts/check-capability-literals.mjs && node scripts/check-shared-purity.mjs && node scripts/check-module-boundaries.mjs && node scripts/check-api-catalog.mjs && node scripts/check-probe-residue.mjs && node scripts/check-i18n-coverage.mjs --strict && node scripts/check-petal-bundle.mjs && node scripts/check-hex-colors.mjs --strict && node scripts/check-image-size.mjs --strict && node scripts/check-sync-manifest.mjs && node scripts/contract-snapshot.mjs && node scripts/verify.mjs",
+    "verify:gate": "node scripts/verify.mjs",
+    "check:i18n": "node scripts/check-i18n-coverage.mjs",
+    "check:hex-colors": "node scripts/check-hex-colors.mjs",
+    "check:image-size": "node scripts/check-image-size.mjs",
+    "check:petal-bundle": "node scripts/check-petal-bundle.mjs",
+    "petal:build": "node scripts/build-petal-core.mjs && node scripts/sync-petal-to-dsh.mjs",
+    "check:ipc-contract": "node scripts/check-ipc-contract.mjs",
+    "check:assets": "node scripts/check-assets-license.mjs",
+    "check:third-party": "node scripts/check-third-party.mjs",
+    "check:package": "node scripts/check-package.mjs",
+    "package:dir": "node scripts/package.mjs",
+    "package:debug": "node scripts/package.mjs --include-debug",
+    "check:capability-literals": "node scripts/check-capability-literals.mjs",
+    "check:shared-purity": "node scripts/check-shared-purity.mjs",
+    "check:module-boundaries": "node scripts/check-module-boundaries.mjs",
+    "check:api-catalog": "node scripts/check-api-catalog.mjs",
+    "check:contract-snapshot": "node scripts/contract-snapshot.mjs",
+    "probe:heap": "electron --no-sandbox scripts/s2-heap/main.cjs --self-test",
+    "smoke:voice": "node scripts/voice-smoke.mjs",
+    "assets:build": "node scripts/build-assets.mjs",
+    "assets:optimize": "node scripts/optimize-assets.mjs",
+    "prebuild": "node scripts/build-assets.mjs",
+    "precheck:history": "node scripts/history-scan.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "electron": "^33.4.11",
+    "electron-builder": "^26.18.0",
+    "typescript": "^5.7.2",
+    "vitest": "^5.0.5"
+  },
+  "dependencies": {
+    "@pixi/unsafe-eval": "6.5.10",
+    "adm-zip": "0.5.16",
+    "pixi-live2d-display": "0.4.0",
+    "pixi.js": "^6.5.10"
+  }
+}
