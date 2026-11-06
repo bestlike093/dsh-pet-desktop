@@ -23,6 +23,7 @@ import {
 import { HOST_CAPABILITY, SIZE_PROFILES, isPresenceQuietNow, mediaKindForName } from '../../../../packages/shared/dist/index.js'
 import { createMotionController } from './motion.mjs'
 import { attachAutoOutline, decideOutlineColor } from './outline.mjs'
+import { pickBubbleEmojiUrl } from './bubble-emoji.mjs'
 
 // 模块图成功建立并执行到这里，index.html 的 3 秒兜底就不会报「未启动」。
 // 若某个 import 让整张模块图失败，这一行不会执行 —— 这正是要把失败显示出来的信号。
@@ -34,6 +35,28 @@ const dpr = window.devicePixelRatio || 1
 
 const appRoot = document.getElementById('app')
 const canvas = document.getElementById('stage')
+
+let pulseTimer = null
+/**
+ * 点击反馈：轻压一下再回弹。
+ * 图片模式点一下会换姿势，原始构图不同，直接重绘看起来像「突然变大变小」；
+ * 用一段短过渡把这次重绘包住，观感就顺了。
+ */
+function pulsePetScale() {
+  if (canvas === null) return
+  canvas.style.transformOrigin = '50% 88%'
+  canvas.style.transition = 'transform .16s cubic-bezier(.22,.61,.36,1)'
+  canvas.style.transform = 'scale(.985)'
+  if (pulseTimer !== null) clearTimeout(pulseTimer)
+  pulseTimer = setTimeout(() => {
+    canvas.style.transform = 'scale(1)'
+    pulseTimer = setTimeout(() => {
+      canvas.style.transition = ''
+      canvas.style.transform = ''
+      pulseTimer = null
+    }, 180)
+  }, 90)
+}
 canvas.width = profile.w
 canvas.height = profile.h
 
@@ -383,6 +406,7 @@ window.addEventListener('pointerup', () => {
   }
   if (!wasDragging && wasOnPet && hasModel) {
     lastSpeakAt = Date.now()
+    pulsePetScale()
     // 默认图片模式才有姿势池：先换一张，再让她说话。Live2D / GIF 不受影响。
     void cycleBundledLook()
     // 点一下属于「小喇叭」：即使设置成只在小喇叭被点时念，这一句也要出声。
@@ -520,7 +544,7 @@ async function applyBundledPose(index) {
 
     bundledPoseIndex = index % bundledPoses.length
     bundledPoseEmotion = pose.emotion
-    renderBubbleMood(bubbleWrapNode(), bundledPoseEmotion)
+    renderBubbleMood()
     setMediaStatus(`随包立绘 · ${pose.key} · ${bundledPoseIndex + 1}/${bundledPoses.length}`)
     return true
   } catch (error) {
@@ -597,13 +621,29 @@ function activateBundledScene(result, stand) {
   bundledPoseEmotion =
     bundledPoses[bundledPoseIndex]?.emotion ?? BUNDLED_POSE_EMOTION.default
 
-  renderBubbleMood(bubbleWrapNode(), bundledPoseEmotion)
+  renderBubbleMood()
   scheduleBundledPose()
 }
 
 /** 清画面：dispose 与加载失败两条路径都要走，否则旧帧会留在 canvas 上。 */
 function clearStage() {
   canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height)
+}
+
+/**
+ * 静态画布与 Live2D 画布共用同一个立绘区，同一时刻只允许一层可见。
+ *
+ * 之前切到 Live2D 时只往立绘区里又叠了一层画布，静态首帧（随包立绘、
+ * 上一张图片）没有被收掉，于是两个角色同时出现在窗口里。像素先清空，
+ * 再整层藏起来；切回静态素材时重新显示，不需要重画。
+ */
+function showStaticStage() {
+  canvas.style.display = ''
+}
+
+function hideStaticStage() {
+  clearStage()
+  canvas.style.display = 'none'
 }
 
 // B2-4 接线：状态必须落到可见元素上，否则「算对了」也只是一块空白。
@@ -684,6 +724,10 @@ async function loadModel(kind, file, label, spriteSheet) {
   // 旧模型已 dispose、不再引用旧 URL，此时释放不会撞上解码中的资源。
   if (currentUrl !== null) blobUrls.release(currentUrl)
   releaseBundledPoseCache()
+
+  // 切到静态素材：撤掉 Live2D 画布，让立绘区只剩这一层。
+  disposeLive2D()
+  showStaticStage()
 
   renderer.attach(model)
   console.log(
@@ -1298,22 +1342,39 @@ function bubbleMoodEmotion() {
   return typeof level === 'string' && level !== '' ? level : 'neutral'
 }
 
+/** 用户选的贴纸：不再固定右上角，而是作为气泡里的表情图。 */
+let activeStickerUrl = ''
+
+/** 默认表情：当前姿势/心情对应的那张情绪图，旧表情失效时兜底用。 */
+function defaultBubbleEmoji() {
+  const emotions = assetsSnapshot?.cyrene?.emotions
+  const byMood = emotions?.[bubbleMoodEmotion()]
+  if (typeof byMood === 'string' && byMood !== '') return byMood
+  // 情绪图缺失时再退到表情包里的第一张，尽量别让气泡空着。
+  const files = assetsSnapshot?.cyrene?.emojiFiles
+  const first = Object.values(files ?? {}).find((url) => typeof url === 'string' && url !== '')
+  return first ?? ''
+}
+
 /**
  * 在气泡内部画一张小表情，跟文字并排。
  *
  * 图放进 .pet-bubble 而不是挂在外层 wrap 上：wrap 只管定位和角角，
  * 文字与表情同处一个内容区，长句换行时表情也不会被挤出气泡。
- * 找不到对应表情就安静地收掉，不留空框。
+ * 找不到对应表情就回落到默认表情，连默认表情都没有才安静地收掉。
  */
-function renderBubbleMood(emotion) {
+function renderBubbleMood(emojiId) {
   const bubble = bubbleNode()
   if (bubble === null) return
-  const key = typeof emotion === 'string' && emotion !== '' ? emotion : bubbleMoodEmotion()
-  const emotions = assetsSnapshot?.cyrene?.emotions
-  const url =
-    emotions !== null && typeof emotions === 'object' && typeof emotions[key] === 'string'
-      ? emotions[key]
-      : ''
+
+  // 三级取图：陪伴层给的 id 最优先；旧 id 找不到素材就换成默认表情。
+  const fallback = defaultBubbleEmoji()
+  const url = pickBubbleEmojiUrl({
+    emojiId,
+    files: assetsSnapshot?.cyrene?.emojiFiles,
+    stickerUrl: activeStickerUrl,
+    fallback
+  })
 
   const existing = bubble.querySelector('.pet-bubble-inline')
   if (url === '') {
@@ -1327,6 +1388,12 @@ function renderBubbleMood(emotion) {
   image.alt = ''
   image.draggable = false
   image.onerror = () => {
+    // 旧素材清掉后，旧聊天里存的 id 或旧贴纸地址会加载失败；
+    // 换成默认表情再试一次，别在气泡里留空框。
+    if (fallback !== '' && image.getAttribute('src') !== fallback) {
+      image.src = fallback
+      return
+    }
     image.remove()
     bubble.classList.remove('has-inline-mood')
   }
@@ -1480,7 +1547,8 @@ function showBubble(text, holdMs = HOLD_SPEAK_MS, options = {}) {
   bubbleTextNode(bubble).textContent = text
   applyBubbleTier(bubble, text)
   const wrap = ensureBubbleWrap(bubble)
-  renderBubbleMood()
+  // 陪伴层可能给了具体表情 id；没有就按当前姿势/心情回落。
+  renderBubbleMood(options.emojiId)
   setBubbleShown(true)
   renderBubbleAck(wrap, ackSegment)
   activeAckSegment = ackSegment
@@ -2153,18 +2221,10 @@ function applyBubbleArt(bubble) {
 
 /** 贴纸挂在 shadow 里，固定右上角；没选就整块移除，不留空节点。 */
 function applySticker(sticker) {
-  const url = packMediaUrl(sticker?.source)
-  const existing = shadow.querySelector('.pet-sticker')
-  if (url === '') {
-    if (existing !== null) existing.remove()
-    return
-  }
-
-  const node = existing ?? document.createElement('img')
-  node.className = 'pet-sticker'
-  node.alt = ''
-  node.src = url
-  if (existing === null) shadow.append(node)
+  activeStickerUrl = packMediaUrl(sticker?.source)
+  // 旧版把贴纸钉在右上角；现在统一交给气泡里的表情位，顺手清掉历史节点。
+  shadow.querySelector('.pet-sticker')?.remove()
+  renderBubbleMood()
 }
 
 /** 把 ui 相关设置落到真实 DOM 上。设置窗改完即时调用，不走重启。 */
@@ -2374,18 +2434,21 @@ function attachMotionAndOutline(app, model) {
   if (hud !== null && hud.hidden === false) renderHud(lastHudInfo)
 }
 let live2dResizeObserver = null
+/** 缩放缓冲：窗口拖动时先攒着，停手后一次性重建画布。 */
+let live2dResizeTimer = null
+let live2dResizePending = null
 
 /**
  * 随包立绘兜底。
  *
- * 没有选中模型、Live2D 运行时缺失或载入失败时，用 assets/whale-girl-stand 的
- * 静态立绘先让人看见她。立绘也读不到时才回到空态卡，不假装加载成功。
+ * 没有选中模型、Live2D 运行时缺失或载入失败时，用随包的 Cyrene 立绘
+ * 先让人看见她。立绘也读不到时才回到空态卡，不假装加载成功。
  */
 /**
- * 挑一张随包立绘：Cyrene 默认立绘优先，其次旧的 whale-girl 立绘。
+ * 挑一张随包立绘：只认 Cyrene。
  *
  * manifest 的 poses.default 是唯一真源；manifest 缺失时退到 cyrene 分组的
- * stand/default.png，两者都没有才用 whale-girl-stand 兜住旧安装包。
+ * stand/default.png。拿不到 Cyrene 时宁可回到空态，也不换一个人上场。
  */
 function pickBundledStand(result) {
   const cyreneDefault = result?.cyrene?.poses?.default
@@ -2404,16 +2467,6 @@ function pickBundledStand(result) {
       url: cyreneStand.url,
       file: cyreneStand.file.split('/').pop() || 'stand.png',
       label: `Cyrene · ${cyreneStand.name || '立绘'}`
-    }
-  }
-
-  const legacy = groups.find((group) => group?.id === 'whale-girl-stand')
-  const legacyFirst = Array.isArray(legacy?.items) ? legacy.items[0] : undefined
-  if (typeof legacyFirst?.url === 'string' && legacyFirst.url !== '') {
-    return {
-      url: legacyFirst.url,
-      file: legacyFirst.file.split('/').pop() || 'stand.png',
-      label: `随包立绘 · ${legacyFirst.name || '立绘'}`
     }
   }
 
@@ -2456,6 +2509,11 @@ function fitLive2DModel(app, model, naturalWidth, naturalHeight) {
 }
 
 function disposeLive2D() {
+  if (live2dResizeTimer !== null) {
+    clearTimeout(live2dResizeTimer)
+    live2dResizeTimer = null
+  }
+  live2dResizePending = null
   if (live2dResizeObserver !== null) {
     live2dResizeObserver.disconnect()
     live2dResizeObserver = null
@@ -2519,6 +2577,8 @@ async function loadLive2DUrl(modelUrl) {
   app.view.style.height = '100%'
   app.view.style.zIndex = '1'
   app.view.style.pointerEvents = 'none'
+  // 两层互斥：先把静态首帧收掉，再叠 Live2D 画布。
+  hideStaticStage()
   host.appendChild(app.view)
   live2dApp = app
 
@@ -2547,13 +2607,32 @@ async function loadLive2DUrl(modelUrl) {
       // 小于 2px 的抖动直接忽略，真正改尺寸时再同步。
       const EPSILON = 2
       if (
-        Math.abs(nextWidth - app.screen.width) <= EPSILON &&
-        Math.abs(nextHeight - app.screen.height) <= EPSILON
+        Math.abs(nextWidth - live2dApp.screen.width) <= EPSILON &&
+        Math.abs(nextHeight - live2dApp.screen.height) <= EPSILON
       ) {
         return
       }
-      app.renderer.resize(nextWidth, nextHeight)
-      fitLive2DModel(app, live2dModel, naturalWidth, naturalHeight)
+      // 缩放缓冲：拖动期间每一帧都 resize 会连续重建 WebGL 画布，
+      // 立绘看起来在抖。这里只记下最新尺寸，静置 140ms 再一次性应用。
+      live2dResizePending = { width: nextWidth, height: nextHeight }
+      if (live2dResizeTimer !== null) clearTimeout(live2dResizeTimer)
+      live2dResizeTimer = setTimeout(() => {
+        live2dResizeTimer = null
+        const pending = live2dResizePending
+        live2dResizePending = null
+        if (pending === null || live2dApp === null || live2dModel === null) return
+        // 定时器等待期间尺寸可能又变了，以最新读数为准。
+        const width = Math.max(1, Math.round(host.clientWidth))
+        const height = Math.max(1, Math.round(host.clientHeight))
+        if (
+          Math.abs(width - live2dApp.screen.width) <= EPSILON &&
+          Math.abs(height - live2dApp.screen.height) <= EPSILON
+        ) {
+          return
+        }
+        live2dApp.renderer.resize(width, height)
+        fitLive2DModel(live2dApp, live2dModel, naturalWidth, naturalHeight)
+      }, 140)
     })
     live2dResizeObserver.observe(host)
 
@@ -2642,7 +2721,8 @@ if (window.pet?.onBubble) {
       const ackSegment = payload.ackSegment
       showBubble(payload.text, ackSegment ? HOLD_ACK_MS : HOLD_NOTICE_MS, {
         speak: false,
-        ackSegment
+        ackSegment,
+        emojiId: payload.emojiId
       })
       // AI 自己挑了动作就播；播不出来也如实记账，不影响这句话正常显示。
       if (typeof payload.motion === 'string' && payload.motion !== '') playAiMotion(payload.motion)

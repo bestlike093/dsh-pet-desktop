@@ -1,0 +1,10 @@
+{
+  "apiVersion": 1,
+  "id": "dyad.pet",
+  "name": "Dyad Pet Probe",
+  "version": "0.1.0",
+  "description": "双宿主探针：同一目录同时提供 Cyrene 与 dsh 入口，只验证加载形态，不做业务",
+  "author": "Cyrene",
+  "entry": "index.cjs",
+  "defaultEnabled": true
+}

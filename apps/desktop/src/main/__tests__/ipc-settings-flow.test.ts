@@ -19,6 +19,8 @@ const queryDeps: QueryChannelDeps = {
   getLastRenderInfo: () => null,
   modelStore: { list: async () => [], root: '', toMediaUrl: () => '' },
   packStore: { list: async () => [] },
+  stickerInbox: { list: async () => [] },
+  stickerLibrary: { list: async () => [] },
   assetLibrary: { list: async () => ({ ok: true, groups: [], total: 0 }) },
   systemStats: { snapshot: () => ({}) },
   presenceService: { currentMood: () => ({}) },
@@ -58,6 +60,13 @@ const mutationDeps: MutationChannelDeps = {
   registerChannel: register,
   dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
   getDialogParent: () => undefined,
+  stickerInbox: {
+    list: async () => [],
+    approve: async () => ({ ok: true }),
+    reject: async () => ({ ok: true })
+  },
+  openStickerWindow: () => undefined,
+  sendQqSticker: async () => ({ ok: true }),
   packStore: {
     importFromZip: async () => ({ id: 'pack-1' }),
     list: async () => [],

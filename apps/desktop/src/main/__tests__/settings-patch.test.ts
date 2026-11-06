@@ -23,7 +23,7 @@ describe('mergeLayer', () => {
 
 describe('sanitizeSettingsPatch', () => {
   it('脏字段被丢，已知字段留', () => {
-    expect(sanitizeSettingsPatch({ llmApiKey: 'x', nickname: '柒柒' })).toEqual({ nickname: '柒柒' })
+    expect(sanitizeSettingsPatch({ llmApiKey: 'x', nickname: '小满' })).toEqual({ nickname: '小满' })
   })
 
   it('已知对象的未知子键被丢，已知子键留', () => {

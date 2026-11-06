@@ -192,7 +192,8 @@ const KNOWN_V2_KEYS: ReadonlySet<string> = new Set([
   'balance',
   'channels',
   'defaultEmotion',
-  'live2dModelId'
+  'live2dModelId',
+  'wakeWords'
 ])
 
 function isPermission(value: string): value is Permission {

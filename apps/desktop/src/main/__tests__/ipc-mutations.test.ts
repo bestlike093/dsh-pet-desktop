@@ -7,6 +7,13 @@ const deps: MutationChannelDeps = {
   registerChannel: (channel, listener) => recorded.push({ channel, listener }),
   dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
   getDialogParent: () => undefined,
+  stickerInbox: {
+    list: async () => [],
+    approve: async () => ({ ok: true }),
+    reject: async () => ({ ok: true })
+  },
+  openStickerWindow: () => undefined,
+  sendQqSticker: async () => ({ ok: true }),
   packStore: {
     importFromZip: async () => ({ id: 'pack-1' }),
     list: async () => [],
@@ -61,7 +68,11 @@ describe('registerMutationChannels / 资产与备份域', () => {
         'pet:packs:remove',
         'pet:packs:setEnabled',
         'pet:settings:save',
-        'pet:backup:probe'
+        'pet:backup:probe',
+        'pet:sticker:approve',
+        'pet:sticker:reject',
+        'pet:sticker:open',
+        'pet:sticker:send'
       ].sort()
     )
   })

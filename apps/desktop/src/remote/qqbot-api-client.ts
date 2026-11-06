@@ -37,6 +37,12 @@ export interface QqBotSendOptions {
   readonly msgSeq: number
 }
 
+/** 待上传的图片字节；contentType 只用于调用方判断，协议本身只认图片。 */
+export interface QqBotImagePayload {
+  readonly contentType: string
+  readonly bytes: Uint8Array
+}
+
 export class QqBotApiError extends Error {
   constructor(
     message: string,
@@ -102,6 +108,49 @@ export class QqBotApiClient {
       throw new QqBotApiError('gateway 响应缺少 url', 200)
     }
     return data.url
+  }
+
+  /**
+   * 被动回复一张图片：先上传富媒体拿 file_info，再发 msg_type 7。
+   * 图片上限 5MB（腾讯限制），调用方应先自行检查；这里只负责协议。
+   */
+  async sendImage(
+    target: QqBotSendTarget,
+    image: QqBotImagePayload,
+    options: QqBotSendOptions
+  ): Promise<void> {
+    const filesPath =
+      target.chatType === 'group'
+        ? `/v2/groups/${encodeURIComponent(target.openid)}/files`
+        : `/v2/users/${encodeURIComponent(target.openid)}/files`
+
+    const uploaded = await this.request<{ file_info?: string }>(filesPath, {
+      method: 'POST',
+      body: JSON.stringify({
+        file_type: 1,
+        // 官方接口接受 base64 的 file_data；不依赖图片有公网地址。
+        file_data: Buffer.from(image.bytes).toString('base64'),
+        srv_send_msg: false
+      })
+    })
+    if (uploaded.file_info === undefined || uploaded.file_info === '') {
+      throw new QqBotApiError('富媒体上传响应缺少 file_info', 200)
+    }
+
+    const messagesPath =
+      target.chatType === 'group'
+        ? `/v2/groups/${encodeURIComponent(target.openid)}/messages`
+        : `/v2/users/${encodeURIComponent(target.openid)}/messages`
+    await this.request(messagesPath, {
+      method: 'POST',
+      body: JSON.stringify({
+        msg_type: 7,
+        media: { file_info: uploaded.file_info },
+        content: '',
+        msg_id: options.msgId,
+        msg_seq: options.msgSeq
+      })
+    })
   }
 
   /**

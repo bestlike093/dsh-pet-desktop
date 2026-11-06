@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { DecisionEnvelope, DecisionReply } from '@pet/shared'
 import { QqGatewayChannel } from '../qqGatewayChannel.js'
-import type { QqGatewayApi } from '../qqGatewayChannel.js'
+import type {
+  QqGatewayApi,
+  QqGatewayInbound,
+  QqGatewayMessage,
+  QqGroupLifecycle
+} from '../qqGatewayChannel.js'
 import type { WebSocketClient } from '../websocket-client.js'
 
 type Listener = (...args: any[]) => void
@@ -88,6 +93,9 @@ async function readyChannel(options: {
   socket?: FakeSocket
   ownerOpenIds?: string[]
   now?: () => number
+  onMessage?: (info: QqGatewayMessage) => void
+  onInbound?: (info: QqGatewayInbound) => void
+  onSystemEvent?: (event: QqGroupLifecycle) => void
 } = {}): Promise<{
   channel: QqGatewayChannel
   socket: FakeSocket
@@ -101,7 +109,10 @@ async function readyChannel(options: {
     ownerOpenIds: options.ownerOpenIds ?? ['owner'],
     api,
     websocketFactory: () => socket as unknown as WebSocketClient,
-    now: options.now ?? (() => Date.now())
+    now: options.now ?? (() => Date.now()),
+    ...(options.onMessage === undefined ? {} : { onMessage: options.onMessage }),
+    ...(options.onInbound === undefined ? {} : { onInbound: options.onInbound }),
+    ...(options.onSystemEvent === undefined ? {} : { onSystemEvent: options.onSystemEvent })
   })
   await channel.start()
   socket.handshake()
@@ -271,6 +282,173 @@ describe('QqGatewayChannel', () => {
       { openid: 'group-1', chatType: 'group' },
       expect.any(String),
       { msgId: 'm2', msgSeq: 1 }
+    )
+  })
+
+  it('非主人被 @ 也进回复通道，原文剥掉 @ 标记', async () => {
+    const onMessage = vi.fn()
+    const { socket } = await readyChannel({ onMessage })
+    socket.push({
+      op: 0,
+      s: 2,
+      t: 'GROUP_AT_MESSAGE_CREATE',
+      d: {
+        id: 'm3',
+        content: '<@!10001> 在吗',
+        group_openid: 'group-1',
+        author: { member_openid: 'guest' }
+      }
+    })
+
+    expect(onMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        chatType: 'group',
+        openId: 'group-1',
+        senderOpenId: 'guest',
+        content: '在吗',
+        mentioned: true
+      })
+    )
+    expect(onMessage.mock.calls[0]?.[0]?.isOwner).toBeUndefined()
+  })
+
+  it('机器人的 openid 不是纯数字时也能剥掉 @ 标记', async () => {
+    const onMessage = vi.fn()
+    const { socket } = await readyChannel({ onMessage })
+    socket.push({
+      op: 0,
+      s: 2,
+      t: 'GROUP_AT_MESSAGE_CREATE',
+      d: {
+        id: 'm3b',
+        content: '<@!B0C91D4E>　今天吃什么',
+        group_openid: 'group-1',
+        author: { member_openid: 'guest' }
+      }
+    })
+
+    expect(onMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: '今天吃什么',
+        mentioned: true
+      })
+    )
+  })
+
+  it('非主人被 @ 可以聊天，但不能拍板', async () => {
+    const { channel, socket } = await readyChannel()
+    const handler = vi.fn()
+    channel.onReply(handler)
+    socket.push({
+      op: 0,
+      s: 2,
+      t: 'GROUP_AT_MESSAGE_CREATE',
+      d: {
+        id: 'm4',
+        content: 'allow abc123',
+        group_openid: 'group-1',
+        author: { member_openid: 'guest' }
+      }
+    })
+
+    expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('机器人被移出群时留下事件，方便解释群里为什么没消息', async () => {
+    const onSystemEvent = vi.fn()
+    const { socket } = await readyChannel({ onSystemEvent })
+    socket.push({
+      op: 0,
+      s: 2,
+      t: 'GROUP_DEL_ROBOT',
+      d: { group_openid: 'group-1', op_member_openid: 'admin-1' }
+    })
+
+    expect(onSystemEvent).toHaveBeenCalledWith({
+      type: 'GROUP_DEL_ROBOT',
+      groupOpenId: 'group-1',
+      operatorOpenId: 'admin-1',
+      at: expect.any(Number)
+    })
+  })
+
+  it('机器人被拉进群时同样记一笔，且不当作消息', async () => {
+    const onSystemEvent = vi.fn()
+    const onMessage = vi.fn()
+    const { socket } = await readyChannel({ onSystemEvent, onMessage })
+    socket.push({
+      op: 0,
+      s: 2,
+      t: 'GROUP_ADD_ROBOT',
+      d: { group_openid: 'group-2', op_member_openid: 'admin-2' }
+    })
+
+    expect(onSystemEvent).toHaveBeenCalledWith({
+      type: 'GROUP_ADD_ROBOT',
+      groupOpenId: 'group-2',
+      operatorOpenId: 'admin-2',
+      at: expect.any(Number)
+    })
+    expect(onMessage).not.toHaveBeenCalled()
+  })
+
+  it('非主人在群里没被 @ 时不进回复通道', async () => {
+    const onMessage = vi.fn()
+    const { socket } = await readyChannel({ onMessage })
+    socket.push({
+      op: 0,
+      s: 2,
+      t: 'GROUP_MESSAGE_CREATE',
+      d: {
+        id: 'm5',
+        content: '随便聊聊',
+        group_openid: 'group-1',
+        author: { member_openid: 'guest' }
+      }
+    })
+
+    expect(onMessage).not.toHaveBeenCalled()
+  })
+
+  it('非主人私聊不触发回复', async () => {
+    const onMessage = vi.fn()
+    const { socket } = await readyChannel({ onMessage })
+    socket.push({
+      op: 0,
+      s: 2,
+      t: 'C2C_MESSAGE_CREATE',
+      d: { id: 'm6', content: 'hello', author: { user_openid: 'guest' } }
+    })
+
+    expect(onMessage).not.toHaveBeenCalled()
+  })
+
+  it('主人的 @ 仍带 isOwner，并且能继续拍板', async () => {
+    const onMessage = vi.fn()
+    const { channel, socket } = await readyChannel({ onMessage })
+    const handler = vi.fn()
+    channel.onReply(handler)
+    socket.push({
+      op: 0,
+      s: 2,
+      t: 'GROUP_AT_MESSAGE_CREATE',
+      d: {
+        id: 'm7',
+        content: '<@!10001> allow abc123',
+        group_openid: 'group-1',
+        author: { member_openid: 'owner' }
+      }
+    })
+
+    expect(onMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: 'allow abc123',
+        mentioned: true,
+        isOwner: true
+      })
+    )
+    expect(handler).toHaveBeenCalledWith(
+      expect.objectContaining({ envelopeId: 'abc123', action: 'allow' })
     )
   })
 })

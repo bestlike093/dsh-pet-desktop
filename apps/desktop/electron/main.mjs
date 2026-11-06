@@ -10,14 +10,17 @@ import {
   Menu,
   nativeImage,
   screen,
+  desktopCapturer,
   powerMonitor,
   safeStorage,
-  session
+  session,
+  Notification
 } from 'electron'
 import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { execFile } from 'node:child_process'
+import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   DecisionGateway,
@@ -28,7 +31,8 @@ import {
   SessionModeGate,
   applyIncomingMessage,
   createLocalTtsProvider,
-  parseOwnerAllowlist
+  parseOwnerAllowlist,
+  segmentAt
 } from '../../../packages/core/dist/index.js'
 import { DEFAULT_SETTINGS } from '../../../packages/shared/dist/index.js'
 import {
@@ -49,17 +53,73 @@ import { IPC_CHANNELS, assertChannel, createWindowOptions } from '../dist/index.
 import { QqOfficialChannel } from '../dist/remote/qqOfficialChannel.js'
 import { QqGatewayChannel } from '../dist/remote/qqGatewayChannel.js'
 import { QqBotApiClient } from '../dist/remote/qqbot-api-client.js'
-import { createChatService } from './chat.mjs'
+import { createChatService, describeSpeaker } from './chat.mjs'
+import { createIntimacyGate } from './intimacy.mjs'
+import {
+  createPhotoStudio,
+  photoMediaUrl,
+  resolvePhotoFolder,
+  shouldSelfieInChat,
+  wantsSelfie
+} from './photo-studio.mjs'
+import {
+  analyzeStyle,
+  describeFormatAdvice,
+  describeStyle,
+  detectCorrection,
+  extractMemeCandidates
+} from './social.mjs'
+import { createSocialProfileStore } from './social-profile.mjs'
+import { createMemeDictionary } from './meme-dictionary.mjs'
+import {
+  buildProactiveNote,
+  buildReviewNote,
+  createProactiveGate,
+  pickCloserLine,
+  resolveOpeningCue,
+  proactiveLimitsFromPresence
+} from './proactive.mjs'
+import { planMemoryRecall } from './memory-intent.mjs'
+import { importHistoryCandidates } from './history-import.mjs'
+import { burstDelay, splitReply } from './reply-split.mjs'
+import { createGroupReplyGate } from './group-reply-gate.mjs'
+import { createGroupManners } from './group-manners.mjs'
+import { classifyGroupAddress } from './group-address.mjs'
+import { redactLogText } from './log-redact.mjs'
+import { OCR_SCRIPT, summarizeScreenText } from './screen-reader.mjs'
+import { createCompanionService } from './companion.mjs'
+import { createEmotionRuntime } from './emotion-runtime.mjs'
+import { createDailyBudget } from './daily-budget.mjs'
+import { createOfflineReply, createRequestGate } from './request-guard.mjs'
+import { createMemoryGuard } from './memory-guard.mjs'
+import { createDailyPlanService } from './daily-plan.mjs'
 import { createPresenceService } from './presence.mjs'
+import { assessTiming, emptyRhythm, normalizeRhythm, recordActivity } from './timing.mjs'
 import { createSystemStats } from './system-stats.mjs'
 import { createAssetLibrary } from './assets.mjs'
 import { createBalanceMonitor } from './balance-monitor.mjs'
 import { createLedgerStore } from './balance-ledger-store.mjs'
+import { describeBalance, describeSystem } from './environment-note.mjs'
+import { describeAnniversaries } from './anniversary.mjs'
 import { createGameDailyService } from './game-daily.mjs'
+import { createGameDailyStore } from './game-daily-store.mjs'
+import { createGameAssistantService } from './game-assistant.mjs'
 import { readSlices, systemTimeZone } from './balance-ledger.mjs'
 import { createMemoryStore } from './memory.mjs'
+import { createEmbeddingService } from './embedding.mjs'
+import { DEFAULT_SLEEP_WINDOW, createBodyService } from './body-state.mjs'
 import { createModelStore } from './models.mjs'
 import { createPackStore } from './packs.mjs'
+import { createStickerInbox } from './sticker-inbox.mjs'
+import { createStickerLibrary } from './sticker-library.mjs'
+import { createAffinity } from './affinity.mjs'
+import { THOUGHT_MIN_AGE_MS, createThoughtPool } from './thoughts.mjs'
+import { createAgendaRuntime } from './agenda-runtime.mjs'
+import { canHandoff, createHandoffStore, summarizeHandoffTopic } from './handoff.mjs'
+import { createInsightService } from './insight.mjs'
+import { createFactStore } from './memory-facts.mjs'
+import { createSpeechHabitStore } from './speech-habits.mjs'
+import { createInnerStateService } from './inner-state.mjs'
 import { buildPersonaPrompt } from './persona.mjs'
 import { buildDailyReview, localDateKey, renderSummary, writeDailyReview } from './daily-review.mjs'
 import {
@@ -90,8 +150,11 @@ import { registerVaultChannels } from '../dist/main/ipc/vault.js'
 import { registerBackupChannels } from '../dist/main/ipc/backup.js'
 import { registerSecretChannels } from '../dist/main/ipc/secrets.js'
 import { registerChatChannels } from '../dist/main/ipc/chat.js'
+import { registerCompanionAgendaChannels } from '../dist/main/ipc/companion.js'
+import { registerInsightChannels } from '../dist/main/ipc/insight.js'
 import { registerSyncChannels } from '../dist/main/ipc/sync.js'
 import { registerDiagnosticsChannels } from '../dist/main/ipc/diagnostics.js'
+import { registerWakeVoiceChannels } from '../dist/main/ipc/wake-voice.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -145,6 +208,8 @@ const dailyStatePath = path.join(userData, 'daily-state.json')
 const memoryPath = path.join(userData, 'memory.bin')
 /** 聊天窗口的历史单独一份：记忆是给模型的摘要，历史是给用户回看的记录。 */
 const chatHistoryPath = path.join(userData, 'chat.bin')
+/** 陪伴层状态：心情、断言记忆、话头、最近用过的表情。同样只在加密仓库可用时落盘。 */
+const companionPath = path.join(userData, 'companion.bin')
 /** 猜拳战绩只存四个计数，坏了整体丢弃，不影响启动。 */
 const rpsStatePath = path.join(userData, 'rps-state.json')
 
@@ -188,10 +253,171 @@ const modelStore = createModelStore({ root: mediaRoot, log })
  * PET_PACKS_ROOT 只用于开发期临时指到别处。
  */
 const packsRoot = devEnv('PET_PACKS_ROOT') || path.join(userData, 'packs')
+
+/**
+ * 照片目录：拍照模块创建时填进来，媒体协议按这个根读图。
+ * 先声明成可变量，是因为协议注册比拍照模块更早。
+ */
+let photoRootDir = ''
 /** 内置素材包跟 assets 走：开发时在仓库根，打包后在 asar 内的 app 根。 */
 const builtinPacksRoot = devEnv('PET_BUILTIN_PACKS_ROOT') || path.join(assetsRoot, 'packs')
 const packStore = createPackStore({ root: packsRoot, builtinRoot: builtinPacksRoot, log })
+/** QQ 偷来的表情包先落这里，用户确认后才进素材包。 */
+const stickerInbox = createStickerInbox({ root: packsRoot, log })
+void stickerInbox.ensure()
 
+/**
+ * 表情库：只用 Cyrene 自己的两套素材。
+ * - cyrene/sticker：气泡小图（数钱、摸摸头）
+ * - sticker-packs/cyrene-agent：整套情绪表情
+ * 用户素材包仍保留扫描，但只用于解析历史图片，不进预览、不参与聊天挑图。
+ */
+const stickerLibrary = createStickerLibrary({
+  roots: [
+    {
+      id: 'builtin',
+      source: 'builtin',
+      packId: 'cyrene-sticker',
+      packName: 'Cyrene 小贴纸',
+      dir: path.join(assetsRoot, 'cyrene', 'sticker'),
+      prefix: 'cyrene/sticker'
+    },
+    {
+      id: 'builtin',
+      source: 'builtin',
+      packId: 'cyrene-agent',
+      packName: 'Cyrene 表情包',
+      dir: path.join(assetsRoot, 'sticker-packs', 'cyrene-agent'),
+      prefix: 'sticker-packs/cyrene-agent'
+    },
+    // QQ 偷来的表情：只参与聊天挑图，不在预览里重复列一遍素材包。
+    {
+      id: 'pack',
+      source: 'pack',
+      packId: 'qq-auto',
+      packName: 'QQ 偷来的',
+      dir: path.join(packsRoot, 'qq-auto'),
+      prefix: 'qq-auto',
+      listed: false,
+      chat: true
+    },
+    // 只在历史消息里还引用着旧 id 时兜底解析，
+    // 不进预览、不参与挑图，避免老会话里的表情变成破图。
+    {
+      id: 'builtin',
+      source: 'builtin',
+      dir: path.join(assetsRoot, 'cyrene', 'stand'),
+      prefix: 'cyrene/stand',
+      listed: false,
+      chat: false
+    },
+    {
+      id: 'pack',
+      source: 'pack',
+      packName: '用户素材',
+      dir: packsRoot,
+      prefix: '',
+      listed: false,
+      chat: false
+    }
+  ],
+  log
+})
+
+/**
+ * 好感度：只记一起说过多少话，用来调语气。
+ * 落在 userData/affinity.json；读不到就从「初识」开始，不影响聊天。
+ */
+const affinity = createAffinity({
+  file: path.join(userData, 'affinity.json'),
+  log
+})
+
+/**
+ * 念头池与「正在陪对方」这段时间的状态。
+ *
+ * 两份都只在观察台里被读到：念头池留她攒下的、还没说出口的话；
+ * 日程状态记「这一次陪伴到几点结束」。落盘失败不影响聊天。
+ */
+const thoughtPool = createThoughtPool({
+  file: path.join(userData, 'thoughts.json'),
+  log
+})
+
+const agendaRuntime = createAgendaRuntime({
+  file: path.join(userData, 'agenda-runtime.json'),
+  log
+})
+void agendaRuntime.ready()
+
+const handoffStore = createHandoffStore({
+  file: path.join(userData, 'handoff.json'),
+  log
+})
+void handoffStore.ready()
+/** 刚切过去、还没把承接说出口的那个窗口；只说一次，不反复提醒。 */
+let pendingHandoffScope = ''
+
+/**
+ * 结构化记忆：偏好、人物、项目、约定。
+ * 和原始对话分开存：原文用来回看，事实用来在以后的对话里被想起。
+ */
+const factStore = createFactStore({
+  filePath: path.join(userData, 'memory-facts.bin'),
+  getMaxFacts: () => settings?.companion?.memory?.maxItems,
+  seal: async (value) => {
+    if (vaultClient === null) throw new Error('vault 未就绪，拒绝以明文写结构化记忆')
+    return await vaultClient.seal(value, { kind: 'envelope' })
+  },
+  open: async (sealed) => {
+    if (vaultClient === null) throw new Error('vault 未就绪，拒绝读取结构化记忆')
+    return await vaultClient.open(sealed)
+  },
+  now: Date.now,
+  log
+})
+
+/**
+ * 说话习惯：只听你自己的句子，学一点语气和打字节奏。
+ * 只落统计，不落原句；群聊不采样。
+ */
+const speechHabits = createSpeechHabitStore({
+  filePath: path.join(userData, 'speech-habits.json'),
+  now: Date.now,
+  log
+})
+
+/**
+ * 群聊格式画像：只落统计结果，不落原句。
+ * 重启后仍能接着用上次学到的节奏；旧画像按 7 天衰减，不会一直停在过去。
+ */
+const socialProfileStore = createSocialProfileStore({
+  filePath: path.join(userData, 'social-profile.json'),
+  now: Date.now,
+  log
+})
+
+/**
+ * 群梗词典：记「见过 / 用过 / 有人接 / 被反问」四件事。
+ * 含义判断留给模型，这里只按使用效果排可用度，被反复反问的梗自动退役。
+ */
+const memeDictionary = createMemeDictionary({
+  filePath: path.join(userData, 'meme-dictionary.json'),
+  now: Date.now,
+  log
+})
+const innerStateService = createInnerStateService({
+  getSettings: () => settings,
+  getApiKey: async () => {
+    const store = requireSecretStore()
+    return await store.get(BALANCE_SERVICE, BALANCE_FIELD)
+  },
+  relationship: affinity,
+  facts: factStore,
+  now: Date.now,
+  fetchImpl: (url, init) => net.fetch(url, init),
+  log
+})
 /** 本机设置同步：只写 userData/sync（或 PET_SYNC_DIR），不连远端端点。 */
 let settingsSync = null
 
@@ -223,6 +449,11 @@ app.on('second-instance', () => {
 let tray = null
 let gateway = null
 let qq = null
+/**
+ * 语音唤醒：运行时按需下载，默认关闭。
+ * 只持有状态与下载器；麦克风权限看它的 isEnabled()，关掉即恢复默认拒绝。
+ */
+let wakeVoice = null
 let webhookServer = null
 /**
  * QQ 运行状态：设置页只读，不参与决策。
@@ -235,7 +466,15 @@ const qqRuntime = {
   reason: '',
   webhookListening: false,
   webhookPort: 0,
-  webhookError: ''
+  webhookError: '',
+  /**
+   * 观察模式：凭据齐全但主人名单为空时，先连上网关记录来源。
+   * 此时可以收消息、不能拍板，用户绑定 openid 后自动退出观察模式。
+   */
+  observeOnly: false,
+  /** 最近一条入站消息的发送者 openid；设置页用它做一键绑定。 */
+  lastInboundOpenId: '',
+  lastInboundAt: 0
 }
 function setQqRuntime(patch) {
   Object.assign(qqRuntime, patch)
@@ -258,6 +497,10 @@ let legacyKeyMigrationWarning = null
 let settingsWin = null
 /** 能力中心；单例。 */
 let abilityWin = null
+/** 观察台；单例。 */
+let insightWin = null
+/** 表情包预览页；单例，和审核队列共用一份磁盘真相。 */
+let stickerWin = null
 /** 猜拳战绩只留内存：小游戏没有跨会话留存的价值，重启即清。 */
 /** 猜拳战绩：内存一份，落盘一份；非自洽数据整体忽略。 */
 const rpsGame = new RockPaperScissors()
@@ -311,6 +554,65 @@ function memoryEnabled() {
 }
 
 /**
+ * 向量检索。
+ *
+ * 设置里填了兼容 /embeddings 的服务，或者本机起了 Ollama，才会真的发请求；
+ * 其余情况 resolveConfig 会直接返回 off，检索仍然只走 BM25，不产生额外延迟。
+ */
+const embeddingService = createEmbeddingService({
+  getConfig: () => settings?.companion?.memory?.embedding ?? null,
+  fetchImpl: (url, init) => net.fetch(url, init),
+  log
+})
+
+/**
+ * 身体层：精力、困意、睡眠债、饥饿、社交能量。
+ *
+ * 关机期间时间照走，读盘时补算（最多 72 小时）。正文只落一句体感，
+ * 数值留在本地，不给对方看。
+ */
+const bodyService = createBodyService({
+  file: path.join(userData, 'body.json'),
+  getSleepWindow: () => settings?.companion?.body?.sleepWindow ?? DEFAULT_SLEEP_WINDOW,
+  now: Date.now,
+  log
+})
+
+/**
+ * 身体层统一入口：回复与主动开口共用同一份体感。
+ * 关掉时返回空串，模型就不会凭空说自己困或饿。
+ *
+ * 这里顺手做两件只有「真的说上话」才会发生的事：
+ * - 有人来找她说话，社交力气要跟着消耗；同一小段时间里连发只算一次，
+ *   免得敲得快反而像被罚。
+ * - 如果她本来在睡，这一句就是把她叫醒的那一下，记一笔，醒来时才知道自己没睡安稳。
+ * 两件都是顺手做，失败不影响这一轮回复。
+ */
+async function readBodyNote(options = {}) {
+  if (settings?.companion?.body?.enabled === false) return ''
+  try {
+    await bodyService.tick()
+    const text = typeof options?.text === 'string' ? options.text.trim() : ''
+    if (text !== '') {
+      // 长句更费神，但封顶；短句按最低一档算。
+      const cost = Math.min(4, 0.8 + text.length * 0.06)
+      await bodyService.noteChat(cost)
+    }
+    const snapshot = bodyService.snapshot()
+    // 睡梦里被叫到：先记一笔打断，再真的醒来。醒来只结算梦，不动已经欠下的睡眠债。
+    // 刚醒的 90 分钟里不重复记，免得连着说几句话就被算成被吵醒好几次。
+    if (snapshot?.asleep === true && text !== '' && snapshot?.justWoke !== true) {
+      await bodyService.markInterrupted()
+      await bodyService.wake()
+    }
+    return bodyService.describe()
+  } catch (error) {
+    log('身体层结算失败，这一轮按平常状态说话', error)
+    return ''
+  }
+}
+
+/**
  * 聊天历史：和记忆同一套加密封装，但单独文件、独立上限。
  * 记忆是给模型的摘要，历史是给用户回看的原文；两者不能混用一份。
  */
@@ -331,6 +633,253 @@ const chatHistoryStore = createMemoryStore({
 
 // buildMemoryDigest 已迁到 src/main/memory.ts，调用点注入存储与历史。
 
+/**
+ * 陪伴层：心情、断言记忆、话头、表情偏好。
+ *
+ * 这些是「同一个自己」的连续性，跨对话、跨重启都要在；
+ * 但它比聊天原文更敏感（断言里会有人名、习惯、情绪），所以和记忆同一套加密，
+ * vault 没就绪时读不到也不写，绝不退回明文。
+ */
+/**
+ * 情绪运行时：余波、表情实验、需求状态。
+ *
+ * 全部默认关闭；打开后只影响表现层和主动开口的分寸，不进入提示词。
+ */
+const emotionRuntime = createEmotionRuntime({
+  getSettings: () => settings,
+  now: Date.now,
+  log
+})
+
+const companionService = createCompanionService({
+  load: async () => {
+    if (vaultClient === null) return null
+    let sealed
+    try {
+      sealed = await fs.readFile(companionPath, 'utf8')
+    } catch (error) {
+      // 第一次运行没有文件是正常状态，不当错误。
+      if (error?.code === 'ENOENT') return null
+      throw error
+    }
+    // 盘上是 JSON 信封；open 出来是明文字节，交给 core 前再解成对象。
+    const bytes = await vaultClient.open(JSON.parse(sealed.replace(/^\uFEFF/, '')), {
+      allowLegacyEpoch: true
+    })
+    return JSON.parse(new TextDecoder().decode(bytes))
+  },
+  save: async (state) => {
+    if (vaultClient === null) throw new Error('vault 未就绪，拒绝以明文写陪伴状态')
+    const sealed = await vaultClient.seal(state, { kind: 'envelope' })
+    // 先写临时文件再改名：断电或崩溃时不会留下半份 JSON。
+    const temp = `${companionPath}.tmp`
+    await fs.writeFile(temp, JSON.stringify(sealed), 'utf8')
+    await fs.rename(temp, companionPath)
+  },
+  getSettings: () => settings,
+  // 情绪余波与需求：只影响表现层，读不到就退回原行为。
+  emotion: emotionRuntime,
+  // 主动开口的分层节奏：好感高一点就多给几次机会，低落时少打扰。
+  // 读不到就按 0（刚认识）处理，不改变原来的默认分寸。
+  favor: () => {
+    try {
+      return affinity.snapshot('desktop').favor
+    } catch {
+      return 0
+    }
+  },
+  log
+})
+
+/**
+ * 每日节目单：一天问一次模型「今天怎么过」。
+ *
+ * 放在聊天之前创建，聊天发送前顺手触发；不等待，也不阻塞回复。
+ * 失败时保持原样，节目单继续沿用昨天的结构。
+ */
+const dailyPlanService = createDailyPlanService({
+  getSettings: () => settings,
+  getApiKey: async () => {
+    const store = requireSecretStore()
+    return await store.get(BALANCE_SERVICE, BALANCE_FIELD)
+  },
+  companion: companionService,
+  now: Date.now,
+  fetchImpl: (url, init) => net.fetch(url, init),
+  log
+})
+
+/**
+ * 每日额度：只记「今天用了多少 token」，跨日自动归零。
+ *
+ * 这份计数不含对话内容，落明文没有泄露风险；坏文件按新一天处理。
+ */
+const dailyBudgetPath = path.join(userData, 'daily-budget.json')
+const dailyBudget = createDailyBudget({
+  getSettings: () => settings,
+  now: Date.now,
+  readState: () => {
+    try {
+      return JSON.parse(fs.readFileSync(dailyBudgetPath, 'utf8'))
+    } catch {
+      return null
+    }
+  },
+  writeState: (state) => {
+    try {
+      fs.writeFileSync(dailyBudgetPath, JSON.stringify(state), 'utf8')
+    } catch (error) {
+      log('额度状态落盘失败', error)
+    }
+  },
+  log
+})
+
+/**
+ * 请求守门与离线兜底：一个拦住短时间内的重复请求，一个在模型失联时垫一句。
+ * 两项都读设置页的开关，关掉后行为与以前完全一致。
+ */
+const requestGate = createRequestGate({ getSettings: () => settings, log })
+const offlineReply = createOfflineReply({ getSettings: () => settings, log })
+
+/**
+ * 用户开口时，把当前日程段临时挂起。
+ *
+ * 只挂起真实存在的段：没有节目单就什么都不写，避免观察台出现一条空记录。
+ * 续期和 30 分钟上限都交给 agendaRuntime，这里不另设定时器。
+ */
+async function noteAgendaSuspendedForChat() {
+  try {
+    const plan = await companionService.currentAgenda()
+    if (plan === null) {
+      log('日程挂起跳过：还没有节目单')
+      return
+    }
+    const segment = segmentAt(plan, Date.now())
+    if (segment === null) {
+      log('日程挂起跳过：此刻没有日程段')
+      return
+    }
+    const snapshot = agendaRuntime.suspend({
+      date: plan.date,
+      segmentId: segment.id,
+      title: segment.title,
+      reason: 'chat',
+      // 睡觉单独记：提示词和观察台都要知道这不是普通的「先停一下」。
+      kind: segment.kind
+    })
+    log(
+      `日程挂起：${segment.title || segment.id}，还会陪你 ${Math.max(
+        1,
+        Math.round((snapshot.remainingMs ?? 0) / 60000)
+      )} 分钟`
+    )
+  } catch (error) {
+    log('日程挂起失败', error)
+  }
+}
+
+/** 对话里只轻轻带一句「本来在做什么」，不抢走对方正在说的话。 */
+function agendaChatNote() {
+  const snapshot = agendaRuntime.snapshot()
+  if (snapshot.suspended !== true) return ''
+  const title = typeof snapshot.title === 'string' ? snapshot.title.trim() : ''
+  if (snapshot.interrupted === true) {
+    return '你刚才其实在睡，被这一句叫醒了。这不是睡够了，只是先陪对方一会儿；如果自然，可以带一点刚醒的迷糊。不用每句话都提。'
+  }
+  const what = title === '' ? '你本来在按自己的日程做事' : `你本来在「${title}」`
+  return `${what}，现在先陪对方聊一会儿。不用每句话都提这件事，只有在自然的时候带一句就好。`
+}
+
+/** 把 scope 说成人能懂的地方，提示词和界面里都不出现 openid。 */
+function scopeLabel(scope) {
+  if (scope === 'desktop') return '桌面'
+  if (typeof scope !== 'string') return '另一个窗口'
+  if (scope.startsWith('qq:group')) return 'QQ 群'
+  if (scope.startsWith('qq:')) return 'QQ 私聊'
+  return '另一个窗口'
+}
+
+/** 用户从另一个窗口切过来：把上一段没说完的话记下来，等这一轮开头轻轻接上。 */
+async function noteScopeSwitch({ from, to, history } = {}) {
+  if (!canHandoff(from, to)) return
+  const topic = summarizeHandoffTopic(history)
+  if (topic === '') return
+  try {
+    await handoffStore.ready()
+    const result = handoffStore.write({ fromScope: from, toScope: to, topic })
+    if (result?.ok === true) pendingHandoffScope = to
+  } catch (error) {
+    log('跨窗口承接写入失败', error)
+  }
+}
+
+/** 用户开口这一轮的额外背景：日程被打断 + 刚换窗口没说完的话 + 今天该穿什么。 */
+async function buildCompanionExtra(payload = {}) {
+  const notes = []
+  try {
+    const agenda = agendaChatNote()
+    if (agenda !== '') notes.push(agenda)
+  } catch (error) {
+    log('日程提示读取失败', error)
+  }
+  const scope = typeof payload?.scope === 'string' ? payload.scope : ''
+  if (scope !== '' && pendingHandoffScope === scope) {
+    pendingHandoffScope = ''
+    try {
+      await handoffStore.ready()
+      // 只消费一次：这句话说过就收起来，免得每轮都像刚想起来。
+      const handoff = handoffStore.consumeFor(scope)
+      if (handoff !== null) {
+        notes.push(
+          `你刚从${scopeLabel(handoff.fromScope)}过来。${handoff.topic}，话还没说完。如果对方没有换话题，就自然接一句；不要提「承接记录」这种说法，也别把原话复述一遍。`
+        )
+      }
+    } catch (error) {
+      log('跨窗口承接读取失败', error)
+    }
+  }
+  try {
+    const lifestyle =
+      typeof presenceService?.currentLifestyleNote === 'function'
+        ? await presenceService.currentLifestyleNote()
+        : ''
+    if (typeof lifestyle === 'string' && lifestyle.trim() !== '') notes.push(lifestyle.trim())
+  } catch (error) {
+    log('节日穿搭提示读取失败', error)
+  }
+  try {
+    const environment = await readEnvironmentNote()
+    if (environment !== '') notes.push(environment)
+  } catch (error) {
+    log('余额与电脑状态提示读取失败', error)
+  }
+  try {
+    const anniversary = readAnniversaryNote()
+    if (anniversary !== '') notes.push(anniversary)
+  } catch (error) {
+    log('纪念日提示读取失败', error)
+  }
+  return notes.join('\n')
+}
+
+/**
+ * 贴近时刻：默认关闭。
+ *
+ * 只记「今天有过一次」，不记内容；文件里只有日期、次数和最后一次的时间。
+ * 开关在设置里，打开前要二次确认；群聊与 QQ 远端一律不经过这里。
+ */
+const intimacyGate = createIntimacyGate({
+  file: path.join(userData, 'intimacy.json'),
+  fs: fsSync,
+  log
+})
+try {
+  intimacyGate.load()
+} catch (error) {
+  log(`[intimacy] 读取失败：${error?.message ?? error}`)
+}
+
 /** 聊天服务：密钥现取现用，短期历史在内存，长期记忆加密落盘。 */
 const chatService = createChatService({
   getSettings: () => settings,
@@ -339,39 +888,796 @@ const chatService = createChatService({
     return await store.get(BALANCE_SERVICE, BALANCE_FIELD)
   },
   getPersonaText: (current) => buildPersonaPrompt(current).text,
-  getMemoryDigest: () =>
-    buildMemoryDigest({
+  // 记忆摘要按会话取：桌面只读桌面的原文，QQ 每个会话只读自己的那一桶。
+  // 先判断这句话要哪一类记忆：「在干嘛」就别翻三个月前的事，「还记不记得」才放宽。
+  getMemoryDigest: async (text, scope) => {
+    const plan = planMemoryRecall(text)
+    const query = typeof text === 'string' ? text : ''
+    // 「在干嘛」这类当下状态用最近几轮就够；明确问旧事时按相关度翻。
+    // 先宽一点取候选，向量只算这一小批，不把整份记忆送出去。
+    const bm25 = plan.preferRecent
+      ? []
+      : memoryStore.search(query, { scope, limit: Math.max(plan.memoryCount * 3, 12) })
+    // 同义改写时 BM25 可能一条不中；用最近几条当向量候选，让混合检索还有机会。
+    const pool =
+      bm25.length > 0
+        ? bm25
+        : memoryStore.recent(Math.max(plan.memoryCount * 3, 12), scope)
+    const vectorScores =
+      plan.preferRecent || pool.length === 0
+        ? null
+        : await embeddingService.scoreAll(
+            query,
+            pool.map((item) => ({ id: item.id, text: item.text }))
+          )
+    // 一条都没命中时仍退回最近记忆，不让提示词里出现空段。
+    const recalled = plan.preferRecent
+      ? []
+      : memoryStore.search(query, { scope, limit: plan.memoryCount, vectorScores })
+    const items = recalled.length > 0 ? recalled : memoryStore.recent(plan.memoryCount, scope)
+    return buildMemoryDigest({
       enabled: memoryEnabled(),
       ...memoryStore.stats(),
-      items: memoryStore.recent(40),
-      historyLength: chatService.history().length
-    }),
-  onExchange: ({ user, assistant, at }) => {
+      count: items.length,
+      items,
+      historyLength: chatService.history(scope).length,
+      query: typeof text === 'string' ? text : ''
+    })
+  },
+  getCompanion: () => companionService,
+  // 每日 token 额度：发请求前先看一眼，拿不到 usage 时不记假账。
+  getDailyBudget: () => dailyBudget,
+  // 频率守门：短时间被刷屏时先停一轮，不打到服务端。
+  getRequestGate: () => requestGate,
+  // 离线兜底：模型失联时用本地句接住，不写历史。
+  getOfflineReply: () => offlineReply,
+  // 身体感觉：回复时也带着此刻的体感，累的时候句子自然短一点。
+  getBodyNote: readBodyNote,
+  // 贴近时刻：默认关。开关打开、桌面本机、次数与冷却都允许、且这一轮有由头时，
+  // 才给一段分寸；其余时候回空串，模型不会知道有这回事。
+  getIntimacyNote: async ({ text, scope }) => {
+    if (scope !== 'desktop') return ''
+    // 精力见底就不靠近；身体层关着或读不到时按「拿不到精力」处理，不拦。
+    let energy
+    if (settings?.companion?.body?.enabled !== false) {
+      try {
+        await bodyService.tick()
+        const snapshot = bodyService.snapshot()
+        if (Number.isFinite(snapshot?.energy)) energy = snapshot.energy
+      } catch (error) {
+        log('贴近时刻读精力失败，这一轮按拿不到精力处理', error)
+      }
+    }
+    // 关系档：生疏时只收着，亲近之后才放开；读不到就按「还没有数据」处理。
+    let relationTier = ''
+    try {
+      await affinity.ready()
+      relationTier = affinity.snapshot('desktop')?.levelId ?? ''
+    } catch (error) {
+      log('贴近时刻读关系档失败，这一轮按没有数据处理', error)
+    }
+    const verdict = intimacyGate.check({
+      settings,
+      scope: 'desktop',
+      userText: typeof text === 'string' ? text : '',
+      personaText: buildPersonaPrompt(settings).text,
+      relationTier,
+      energy,
+      at: Date.now()
+    })
+    return verdict.open ? intimacyGate.promptFor(verdict.tone, verdict.proactive === true) : ''
+  },
+  // 红线过滤对所有桌面回复生效：开关关着时直接放行，不改一个字。
+  filterIntimacy: (text) => intimacyGate.filterReply(text, Date.now()),
+  // 真说出口才推进一格：第一次计一次数，到顶自动收场并留余韵。
+  // 收场会回报 ended，顺手记一笔额外的社交消耗——这一场比平时更累。
+  onIntimacySpoken: () => {
+    const next = intimacyGate.noteTurn()
+    if (next?.ended === true && settings?.companion?.body?.enabled !== false) {
+      void bodyService.noteChat(4).catch((error) => log('贴近收场消耗记账失败', error))
+    }
+    return next
+  },
+  // 用户真的开口时，把当前日程段临时挂起；主动开口不走这里。
+  onUserMessage: noteAgendaSuspendedForChat,
+  // 换窗口时把上一段没说完的话带过去；只记一句摘要，不搬原文。
+  onScopeSwitch: noteScopeSwitch,
+  // 这一轮的额外背景：日程被打断、刚换窗口、今天该穿什么。失败就静默省略。
+  getCompanionExtra: buildCompanionExtra,
+  // 表情清单：只给标签，不给磁盘路径；模型按标签写 [[表情:xxx]]。
+  getStickerHint: () => stickerLibrary.promptHint(),
+  // 关系状态：每个来源各读各的，读不到由聊天层自己跳过。
+  getAffinityNote: async (scope) => {
+    await affinity.ready()
+    return affinity.describe(scope)
+  },
+  // 结构化记忆：按当前这句话召回，不把整本记忆塞进提示词。
+  // 纠错时多取几条证据，问当下时少取几条，避免答非所问。
+  getFactNote: async (text, scope) => {
+    await factStore.load()
+    const said = typeof text === 'string' ? text : ''
+    // 「你记错了」这类话，先落到上一轮真正端出去的那条记忆上，再重新召回。
+    // 降级发生在提示词拼装之前，所以这一轮就不会把刚被否认的事再说一遍。
+    if (said !== '' && detectCorrection(said).corrected) {
+      const demoted = factStore.noteDenial()
+      if (demoted.ok === true) {
+        log(`[memory] 被否认后降级：${demoted.before} → ${demoted.after}（${demoted.text.slice(0, 30)}）`)
+      }
+    }
+    const plan = planMemoryRecall(said)
+    const digest = factStore.digest({
+      query: said,
+      count: plan.factCount,
+      scope,
+      // 群聊只带「随时可提」的记忆；私聊才给「被问到再说」的条目。
+      context: typeof scope === 'string' && scope.startsWith('qq:group') ? 'group' : 'private'
+    })
+    // 顺手听一句她怎么说话：只统计形状，不存原句；群聊在 store 里直接跳过。
+    let habit = ''
+    try {
+      await speechHabits.load()
+      speechHabits.observe(scope, said)
+      habit = speechHabits.note(scope)
+    } catch (error) {
+      log(`[habits] 这一轮跳过：${error?.message ?? error}`)
+    }
+    return habit === '' ? digest : `${digest}\n\n${habit}`
+  },
+  // 群聊语感：只用网关内存里的最近几条消息做统计，不落盘、不写记忆。
+  // 样本太少就返回空串，宁可不写画像，也不拿两句话当规律。
+  getSocialNote: async ({ scope }) => {
+    if (qq === null || typeof qq.recentMessages !== 'function') return ''
+    if (typeof scope !== 'string' || !scope.startsWith('qq:group')) return ''
+    const key = scope.slice(3)
+    // 样本扩到 200 条；重启后即使内存空了，也能接着用上次落盘的统计结果。
+    const messages = qq.recentMessages(key, 200)
+    await socialProfileStore.load()
+    const saved = socialProfileStore.get(scope)
+    if (messages.length < 6 && saved === null) return ''
+    const fresh = messages.length >= 6 ? analyzeStyle(messages) : null
+    const style = fresh === null ? saved : socialProfileStore.remember(scope, fresh) ?? fresh
+    const described = describeStyle(style)
+    const format = describeFormatAdvice(style)
+    const imitate = settings?.channels?.qq?.imitateFormat !== false
+    const memes = messages.length >= 6 ? extractMemeCandidates(messages, { limit: 3 }) : []
+    // 候选先入词典，再看哪些以前真的用过、有人接。
+    await memeDictionary.load()
+    if (memes.length > 0) memeDictionary.observe(scope, memes)
+    const usable = memeDictionary.digest(scope, 3)
+    const lines = []
+    if (described !== '' && imitate) lines.push(`这群人的说话方式：${described}`)
+    if (format !== '' && imitate) lines.push(`这条回复可以这样发：${format}`)
+    if (memes.length > 0) {
+      lines.push(
+        `群里反复出现的说法：${memes.map((item) => `「${item.phrase}」`).join('、')}。只在你确定含义时顺着用；不确定就别接，更不要解释它。`
+      )
+    }
+    const proven = usable.filter((item) => item.pickedUp > 0).map((item) => item.phrase)
+    const risky = usable.filter((item) => item.askedBack > 0).map((item) => item.phrase)
+    if (proven.length > 0) lines.push(`以前用过、有人接的：${proven.map((item) => `「${item}」`).join('、')}`)
+    if (risky.length > 0) lines.push(`以前用了有人反问的：${risky.map((item) => `「${item}」`).join('、')}，别再用了`)
+    return lines.join('\n')
+  },
+  // 每条消息前顺手确保今天的节目单在；内部有「一天一次」与并发合并，不会重复打模型。
+  beforeSend: () => {
+    void dailyPlanService.ensure()
+  },
+  onExchange: async ({ user, assistant, at, scope, source }) => {
+    // 对方开口了：这一本「说了没人接」的账就此作废，收场不该再补一句。
+    // QQ 在进模型前已经即时清过一次，这里是幂等的；桌面只能等到这一轮走完才知道。
+    proactiveGate.noteUserSpoke(typeof scope === 'string' && scope !== '' ? scope : 'desktop')
+    // 作息只为桌面记：QQ 那头可能人在外面、也可能半夜在手机上，
+    // 混进来会把「这个点在不在电脑前」算歪。
+    noteDesktopActivity(typeof scope === 'string' && scope !== '' ? scope : 'desktop', at)
+    // 内心状态先记一笔：即使长期记忆关掉，这几轮对话也要留给下次评估。
+    // scope 决定这份好感与记忆归谁：桌面一份，QQ 每个会话各一份。
+    await affinity.ready()
+    affinity.recordTurn(user, assistant, scope)
+    // 攒够几轮就在后台评估一次；不等结果，也不影响这一轮回复。
+    innerStateService.maybeUpdate(scope)
     if (!memoryEnabled()) return
-    memoryStore.appendTurn('user', user, at)
-    memoryStore.appendTurn('assistant', assistant, at)
+    // 原文摘要仍共用一份，但给外部渠道的话留来源与说话人，
+    // 免得摘要时把群里 A 的话算到 B 头上。
+    const tag =
+      source?.channel === 'qq'
+        ? source.chatType === 'group'
+          ? `［QQ 群聊｜${describeSpeaker(source) || '群友'}］`
+          : '［QQ 私聊］'
+        : ''
+    memoryStore.appendTurn('user', `${tag}${user}`, at, source, scope)
+    memoryStore.appendTurn('assistant', assistant, at, null, scope)
   },
   // 聊天历史独立落盘；加密仓库不可用时 appendTurn 返回 false，自动退回内存。
+  // scope 必须一起写：assistant 那一半没有 source，只能靠它跟着同一轮走。
   persistTurn: (turn) => {
-    chatHistoryStore.appendTurn(turn.role, turn.content, turn.at)
+    chatHistoryStore.appendTurn(turn.role, turn.content, turn.at, turn.source, turn.scope ?? null)
   },
   persistClear: () => chatHistoryStore.clear(),
   fetchImpl: (url, init) => net.fetch(url, init),
   log
 })
 
+/** 单张表情上限 8MB；超过就跳过，避免把内存和磁盘打满。 */
+const QQ_STICKER_MAX_BYTES = 8 * 1024 * 1024
+/**
+ * 偷图分寸：默认开，群聊也偷。
+ *
+ * 这两项没进设置页，先用环境变量兜底；
+ * PET_STICKER_STEAL=0 全关，PET_STICKER_GROUP=0 只偷私聊。
+ */
+const STICKER_STEAL_ENABLED = process.env.PET_STICKER_STEAL !== '0'
+const STICKER_STEAL_IN_GROUP = process.env.PET_STICKER_GROUP !== '0'
+/** 每个会话每天最多收这么多张，防止一个热闹的群把磁盘塞满。 */
+const STICKER_STEAL_DAILY_CAP = (() => {
+  const raw = Number(process.env.PET_STICKER_DAILY_CAP)
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 40
+})()
+/** key 是「会话 + 日期」，只放内存：重启后重新计数，不影响已经收下的图。 */
+const stickerStealBudget = new Map()
+const STICKER_STEAL_BUDGET_LIMIT = 200
+
+function stickerStealBudgetKey(info) {
+  const now = new Date()
+  return `${info.chatType}:${info.openId}:${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()}`
+}
+
+/** 今天这个会话还有额度吗？有就顺手扣一张。 */
+function takeStickerStealBudget(info) {
+  if (stickerStealBudget.size > STICKER_STEAL_BUDGET_LIMIT) stickerStealBudget.clear()
+  const key = stickerStealBudgetKey(info)
+  const used = stickerStealBudget.get(key) ?? 0
+  if (used >= STICKER_STEAL_DAILY_CAP) return false
+  stickerStealBudget.set(key, used + 1)
+  return true
+}
+
+/**
+ * 把 QQ 消息里的图片下载到待审核目录。
+ * 内容重复的会在 inbox 里被指纹挡掉，这里只负责下载和计数。
+ */
+async function saveQqImages(info, images) {
+  if (!STICKER_STEAL_ENABLED) return []
+  if (info.chatType === 'group' && !STICKER_STEAL_IN_GROUP) return []
+  const saved = []
+  for (const image of images) {
+    if (image.size > QQ_STICKER_MAX_BYTES) {
+      log(`[sticker] 跳过过大的图片：${image.size} bytes`)
+      continue
+    }
+    if (!takeStickerStealBudget(info)) {
+      log(`[sticker] 今天这个会话已经收满 ${STICKER_STEAL_DAILY_CAP} 张，先不偷了`)
+      break
+    }
+    try {
+      const response = await net.fetch(image.url)
+      if (!response.ok) {
+        log(`[sticker] 下载失败 HTTP ${response.status}`)
+        continue
+      }
+      const buffer = Buffer.from(await response.arrayBuffer())
+      if (buffer.byteLength > QQ_STICKER_MAX_BYTES) {
+        log(`[sticker] 下载后超过上限，丢弃：${buffer.byteLength} bytes`)
+        continue
+      }
+      const item = await stickerInbox.add({
+        buffer,
+        contentType: image.contentType,
+        source: 'qq',
+        chatType: info.chatType,
+        // 群号与发图的人分开记：以后想知道「这张是从哪个群顺来的」还能查到。
+        groupOpenId: info.chatType === 'group' ? info.openId : '',
+        senderOpenId: info.senderOpenId,
+        filename: image.filename,
+        // AI 自动分拣默认开启；设置里可以显式关掉。
+        autoApprove: settings.sticker?.autoApprove !== false
+      })
+      saved.push(item)
+    } catch (error) {
+      log(`[sticker] 保存失败：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  return saved
+}
+
+/**
+ * 模型偶尔会忘了写 [[表情:…]]：按回复里的情绪词兜底挑一张。
+ * 这是「让桌宠真的会发图」的保险，不替代模型自己的判断。
+ */
+const STICKER_FALLBACK_RULES = [
+  { pattern: /(晚安|去睡|睡觉啦|睡咯)/, label: '晚安' },
+  { pattern: /(早安|早上好)/, label: '早安' },
+  { pattern: /(哈哈|笑死|嘿嘿|好耶|太棒|厉害|开心)/, label: '好耶' },
+  { pattern: /(抱抱|抱一下|贴贴)/, label: '抱抱' },
+  { pattern: /(想你|想我|念你)/, label: '想我' },
+  { pattern: /(呜呜|委屈|难过|不开心|心疼)/, label: '委屈' },
+  { pattern: /(加油|可以的|没问题|别怕)/, label: '加油' },
+  { pattern: /(谢谢|多谢|太好了)/, label: '谢谢' },
+  { pattern: /(害羞|脸红)/, label: '害羞' },
+  { pattern: /(晚安啦|困了|累了)/, label: '困了' }
+]
+
+/** 每个会话 10 分钟内最多自动补一张，免得把被动回复额度刷光。 */
+const QQ_STICKER_FALLBACK_GAP_MS = 10 * 60 * 1000
+const lastQqStickerAt = new Map()
+
+/**
+ * 兜底挑图：先看回复本身，再看用户这句话。
+ * 返回空串表示这次不补。
+ */
+function fallbackStickerLabel(reply, userText, chatKey) {
+  const now = Date.now()
+  const previous = lastQqStickerAt.get(chatKey) ?? 0
+  if (now - previous < QQ_STICKER_FALLBACK_GAP_MS) return ''
+  const text = `${reply}\n${userText}`
+  for (const rule of STICKER_FALLBACK_RULES) {
+    if (rule.pattern.test(text)) return rule.label
+  }
+  return ''
+}
+
+/** 斗图回敬的间隔：半小时内最多一次，免得每次发图都追着回。 */
+const QQ_STOLEN_REPLY_GAP_MS = 30 * 60 * 1000
+const lastStolenReplyAt = new Map()
+
+/**
+ * 从「QQ 偷来的」素材包里随手挑一张发回去。
+ *
+ * 这些图没有语义标签，只能随机挑；所以只在对方只发图、没说话时用，
+ * 而且有半小时冷却，避免变成无脑复读机。
+ */
+async function replyWithStolenSticker(channel, chatKey) {
+  if (typeof channel.replyImage !== 'function') return false
+  const now = Date.now()
+  if (now - (lastStolenReplyAt.get(chatKey) ?? 0) < QQ_STOLEN_REPLY_GAP_MS) return false
+  const picked = await stickerLibrary.pickStolen()
+  if (picked === null) return false
+  try {
+    const bytes = await fs.readFile(picked.abs)
+    const ok = await channel.replyImage(picked.contentType, bytes)
+    if (ok) {
+      lastStolenReplyAt.set(chatKey, now)
+      log(`[sticker] 用偷来的图回敬了一张（${picked.file}）`)
+    }
+    return ok
+  } catch (error) {
+    log(`[sticker] 回敬失败：${error instanceof Error ? error.message : String(error)}`)
+    return false
+  }
+}
+
+/**
+ * QQ 普通聊天：主人发来的文本走本地聊天服务，再用被动回复窗口发回去。
+ * 带图消息先偷进待审核队列，绝不自动入库。
+ * 官方限制私聊每小时 4 条、群 5 分钟 5 条；超出时 replyText 返回 false 并记日志。
+ */
+/**
+ * 长回复连发：按句子拆成两三条，中间留一点打字时间。
+ *
+ * 官方 QQ 接口没有「正在输入」状态，只有通道自己支持时才调一次；
+ * 不支持时只靠句间停顿，读起来也像人在一段段打。
+ * 拆段后某一条没发出去，就把剩下的合起来再试一次，
+ * 不让后半句悄无声息地丢掉。
+ */
+async function sendBurstReply(channel, chatType, openId, text) {
+  // 官方 QQ 的被动回复有次数限制（私聊每小时 4 条），拆太多会把窗口用光。
+  // 所以只对确实很长的回复拆两条，而且门槛放得比桌面气泡高。
+  const parts = splitReply(text, { minLength: 90, maxParts: 2 })
+  if (parts.length <= 1) return channel.replyText(chatType, openId, text)
+  let sent = false
+  for (let index = 0; index < parts.length; index += 1) {
+    if (index > 0) {
+      if (typeof channel.setInputStatus === 'function') {
+        try {
+          await channel.setInputStatus(openId, true)
+        } catch (error) {
+          log(`[qq] 正在输入状态没设上：${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, burstDelay(parts[index - 1])))
+    }
+    const ok = await channel.replyText(chatType, openId, parts[index])
+    if (ok === true) {
+      sent = true
+      continue
+    }
+    if (index > 0) {
+      try {
+        await channel.replyText(chatType, openId, parts.slice(index).join(''))
+      } catch (error) {
+        log(`[qq] 剩下的半句没补上：${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    break
+  }
+  if (typeof channel.setInputStatus === 'function') {
+    try {
+      await channel.setInputStatus(openId, false)
+    } catch {
+      // 状态复位失败不影响已经发出去的内容，下一次会重新设。
+    }
+  }
+  if (sent && parts.length > 1) log(`[qq] 连发 ${parts.length} 条（${chatType}:${openId}）`)
+  return sent
+}
+
+async function handleQqChat(info) {
+  const channel = qq
+  if (channel === null || typeof channel.replyText !== 'function') return
+
+  // 群里被 @ 说明对方明确在叫她；陌生人也回，但要单独限流，别把模型额度刷光。
+  if (info.chatType === 'group' && info.mentioned === true && info.isOwner !== true) {
+    const verdict = groupReplyGate.allow({
+      scope: `qq:group:${info.openId}`,
+      senderOpenId: info.senderOpenId
+    })
+    if (verdict.ok !== true) {
+      log(`[qq] 群里 @ 回复跳过（${verdict.reason ?? 'rate-limited'}）`)
+      return
+    }
+  }
+
+  const images = Array.isArray(info.images) ? info.images : []
+  const saved = images.length > 0 ? await saveQqImages(info, images) : []
+
+  // 主人要照片：先在本地按下快门，这一轮回复完再把图递过去。
+  // 群里只认主人，陌生人一句「拍张照」不该把桌面画面要走。
+  const wantsPhoto = shouldSelfieInChat({
+    text: info.content,
+    chatType: info.chatType,
+    isOwner: info.isOwner === true
+  })
+  let selfie = null
+  if (wantsPhoto) {
+    const taken = await photoStudio.take()
+    if (taken.ok === true) {
+      try {
+        selfie = { contentType: 'image/png', bytes: await fs.readFile(taken.photo.path) }
+      } catch (error) {
+        log(`[qq] 刚拍的照片读不出来：${error instanceof Error ? error.message : String(error)}`)
+      }
+    } else {
+      log(`[qq] 拍照没成（${taken.reason ?? 'unknown'}）`)
+    }
+  }
+
+  const fresh = saved.filter((item) => item.duplicate !== true)
+  const dupCount = saved.length - fresh.length
+  const autoCount = fresh.filter((item) => item.autoApproved === true).length
+  const pendingCount = fresh.length - autoCount
+  // 群里人多，偷图这件事不汇报；只有主人发图、或被明确叫到时才说一句。
+  const mayReportSticker =
+    info.chatType !== 'group' || info.mentioned === true || info.isOwner === true
+  const stickerNote =
+    fresh.length > 0 && mayReportSticker
+      ? `\n\n（收到 ${fresh.length} 张：${autoCount} 张自动收下了，${pendingCount} 张等你确认${
+          dupCount > 0 ? `；另外 ${dupCount} 张库里已经有了` : ''
+        }）`
+      : ''
+
+  // 纯图片消息不走聊天，避免模型对着空文本硬回一句。
+  if (info.content === '') {
+    if (fresh.length > 0 && mayReportSticker) {
+      await channel.replyText(
+        info.chatType,
+        info.openId,
+        `偷到 ${fresh.length} 张啦♪ ${autoCount} 张人家先收进「自动收下」，${
+          pendingCount > 0 ? `${pendingCount} 张等你点一下` : '都挺像表情包的'
+        }${dupCount > 0 ? `；还有 ${dupCount} 张以前就收过` : ''}。`
+      )
+    }
+    // 对方只丢了一张图过来：顺手拿库里偷来的图回敬一张，像真的在斗图。
+    if (saved.some((item) => item.packId === 'qq-auto')) {
+      await replyWithStolenSticker(channel, `${info.chatType}:${info.openId}`)
+    }
+    return
+  }
+
+  try {
+    const chatKey = `${info.chatType}:${info.openId}`
+    const groupScope = info.chatType === 'group' ? `qq:group:${info.openId}` : ''
+    // 主动开口的账本按会话分开：群和私聊不互相抵消。
+    const proactiveScope =
+      info.chatType === 'group' ? `qq:group:${info.openId}` : `qq:private:${info.openId}`
+    // 对方开口了：先清掉「发出去没人接」的账，止损立刻解除。
+    // 顺序要在调模型之前，这一轮不该因为旧账被拦。
+    proactiveGate.noteUserSpoke(proactiveScope)
+    // 之前问过、还没结论的话头，交给这一轮一起判断要不要接。
+    const reviews = proactiveGate.pendingReviews(proactiveScope)
+    const reviewNote = buildReviewNote(reviews)
+    // 先看这句话是不是在接上次的梗、或者没听懂在反问；只对群聊记账。
+    if (groupScope !== '') {
+      await memeDictionary.load()
+      memeDictionary.observeReply(groupScope, info.content)
+    }
+    // 照片已经真拍下来了：这一轮的话得跟它配得上，别嘴上说「拍好了」手里却没有。
+    const photoHint =
+      selfie === null
+        ? ''
+        : '（这一轮已经真拍下一张，照片会跟着回复一起发出去；可以顺口提一句。）'
+    // 来源必须一起传下去：网关只给纯文本，模型不知道这句话是从 QQ 来的。
+    const result = await chatService.send({
+      text: info.content,
+      reviewNote: [reviewNote, photoHint].filter((line) => line !== '').join('\n'),
+      source: {
+        channel: 'qq',
+        chatType: info.chatType,
+        openId: info.openId,
+        senderOpenId: info.senderOpenId,
+        msgId: info.msgId,
+        // 主人的消息单独标出来：群聊里「你」指谁，靠这个字段区分。
+        isOwner: info.isOwner === true
+      }
+    })
+    if (result?.ok !== true) {
+      log(`[qq] 聊天未回复：${result?.reason ?? 'unknown'}`)
+      return
+    }
+    const reply = typeof result.reply === 'string' ? result.reply.trim() : ''
+    if (reply === '') return
+    const sent = await sendBurstReply(
+      channel,
+      info.chatType,
+      info.openId,
+      `${reply}${stickerNote}`
+    )
+    log(`[qq] 聊天回复${sent ? '已发送' : '未发送'}（${info.chatType}:${info.openId}）`)
+    // 真发出去才记「用了一个梗」，没发出去的只当没说过。
+    if (sent && groupScope !== '') memeDictionary.markUsed(groupScope, reply)
+    // 顺手记下刚说过什么：下一句接话时，才知道是不是还在同一条线上。
+    if (sent && groupScope !== '') groupLastSpoken.set(groupScope, { text: reply, at: Date.now() })
+    // 回应也占一次「刚说完」：别隔两秒又自己接一句。
+    if (sent && groupScope !== '') groupManners.noteSpoken(groupScope)
+    // 这一轮已经带着话头提示回过了：从待复核里结掉，避免下轮反复注入同一件事。
+    // 模型具体判定成什么不在这里区分——回复本身已经把它处理掉了。
+    if (sent && reviews.length > 0) {
+      for (const item of reviews) proactiveGate.resolveOpenLoop(proactiveScope, item.id, 'done')
+    }
+
+    // 刚被要的那张照片先发：被动回复额度有限，它比随手补的表情重要。
+    if (sent && selfie !== null && typeof channel.replyImage === 'function') {
+      try {
+        const ok = await channel.replyImage(selfie.contentType, selfie.bytes)
+        log(`[qq] 照片${ok ? '已发送' : '未发送'}（${info.chatType}:${info.openId}）`)
+      } catch (error) {
+        log(`[qq] 照片发送失败：${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+
+    // 文字先发出去，再补一张表情：模型自己点了就用它的标签，忘了就按情绪兜底补一张。
+    let label = typeof result.stickerLabel === 'string' ? result.stickerLabel.trim() : ''
+    const fromModel = label !== ''
+    if (label === '') label = fallbackStickerLabel(reply, info.content, chatKey)
+
+    if (sent && selfie === null && label !== '') {
+      const picked = await stickerLibrary.pick(label)
+      if (picked === null) {
+        log(`[qq] 表情标签没对上：${label}`)
+      } else if (typeof channel.replyImage === 'function') {
+        try {
+          const bytes = await fs.readFile(picked.abs)
+          const ok = await channel.replyImage(picked.contentType, bytes)
+          log(
+            `[qq] 表情${ok ? '已发送' : '未发送'}（${picked.label} ← ${fromModel ? label : `兜底:${label}`}）`
+          )
+          if (ok) lastQqStickerAt.set(chatKey, Date.now())
+        } catch (error) {
+          log(`[qq] 表情发送失败：${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+    }
+  } catch (error) {
+    log(`[qq] 聊天处理失败：${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+/**
+ * 主动开口的闸门：按群记账，冷却与每日上限都在模块里，主进程不再另存一份。
+ *
+ * 分寸跟着设置页走：getLimits 每次判断现读 settings.presence，
+ * 改完「多久说一次」或「夜间不扰」，下一句就按新的来。
+ * 设置还没读出来时返回默认，绝不因为缺字段把闸门关死。
+ */
+const proactiveGate = createProactiveGate({
+  getLimits: () => proactiveLimitsFromPresence(settings?.presence),
+  levelOf: (scope) => {
+    try {
+      return affinity.snapshot(scope).levelId
+    } catch {
+      return null
+    }
+  }
+})
+
+/** 群 @ 回复的独立闸门：陌生人也回，但不能连点刷额度。 */
+const groupReplyGate = createGroupReplyGate()
+
+/**
+ * 群聊接话的分寸：热聊不插、刚说完不连说、大群没人叫不主动。
+ * 计数只在内存里，重启清空；宁可少接一次。
+ */
+const groupManners = createGroupManners()
+/**
+ * 她在这个群最后说的一句话。
+ *
+ * 只留最近一条、只放在内存里：用来判断「对方是不是在接她刚说的话」。
+ * 重启就清空——宁可少接一次，也不把旧话当成现在还在聊。
+ */
+const groupLastSpoken = new Map()
+
+/** 读这个群相关的事实，只给「话题命中」用；读不到就当没有，别让插话依赖记忆是否开启。 */
+async function loadProactiveFacts(scope) {
+  try {
+    await factStore.load()
+    const snapshot = factStore.snapshot(scope)
+    const list = Array.isArray(snapshot?.facts) ? snapshot.facts : []
+    return list
+      .map((item) => (typeof item?.text === 'string' ? item.text : ''))
+      .filter((item) => item !== '')
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 群里的主动开口：只在两种时候考虑——
+ * 有人叫了她的名字，或话题撞上了她记得的事。
+ *
+ * 分寸在 proactive.mjs（深夜不说、半小时内不重复、每天最多三次），
+ * 再和桌面端共享同一个日预算；群里没人接话不算进桌面的降速。
+ * 这里只负责真正发出去，以及发送成功后才记账。
+ */
+async function maybeSpeakInGroup(info) {
+  const channel = qq
+  if (channel === null || typeof channel.replyText !== 'function') return
+  if (info.chatType !== 'group') return
+  const text = typeof info.content === 'string' ? info.content.trim() : ''
+  if (text === '') return
+
+  const scope = `qq:group:${info.openId}`
+  // 先看这条消息和她是什么关系：在叫她、在接她的话、聊到她在意的事，还是别人之间的闲聊。
+  // 这一层不决定回不回，只决定「值不值得交给后面的分寸判断」。
+  await factStore.load()
+  const topics = factStore
+    .snapshot(scope)
+    .facts.filter((fact) => fact.archived !== true)
+    .slice(-12)
+    .map((fact) => fact.text)
+  const address = classifyGroupAddress({
+    text,
+    mentioned: info.mentioned === true,
+    wakeWords: settings.wakeWords,
+    lastSpoken: groupLastSpoken.get(scope) ?? null,
+    topics
+  })
+  if (address.level === 'ambient') return
+
+  // 接话的分寸：群里正聊得热闹、她刚说完、大群里没人叫，都先不插。
+  // 被点名时直接放行——叫她就该应声，这点礼貌不能被降频挡掉。
+  const manner = groupManners.judge({
+    scope,
+    addressed: address.level === 'addressed',
+    memberCount: info.memberCount
+  })
+  if (manner.allow !== true) {
+    log(`[qq] 群里的这一条先不接（${manner.reason ?? 'manner'}）`)
+    return
+  }
+
+  // 「主动台词」关着时，只接明确叫她的和刚聊完的，不自己找话头。
+  if (address.level === 'topic' && settings?.presence?.aiEnabled !== true) return
+
+  // 精力也参与群里的分寸：困到不行时只应被叫到的，不接别人的话头；
+  // 只是累了就不自己找话题，刚聊完的那条线仍可以接。
+  let groupBody = null
+  if (settings?.companion?.body?.enabled !== false) {
+    await bodyService.tick()
+    groupBody = bodyService.snapshot()
+  }
+  const groupFlags = groupBody?.flags ?? {}
+  if (groupFlags.exhausted === true && address.level !== 'addressed') return
+  if ((groupFlags.lowEnergy === true || groupFlags.drained === true) && address.level === 'topic') {
+    return
+  }
+
+  const decision = proactiveGate.decide(scope, {
+    text,
+    speaker: info.senderOpenId,
+    // 平台只把明确 @ 她的群消息推成这个事件；被叫到就直接接。
+    addressed: address.level === 'addressed',
+    // 刚说完、对方还在这条线上：算回应，不需要另找由头。
+    continuation: address.level === 'continuation',
+    wakeWords: settings.wakeWords,
+    facts: await loadProactiveFacts(scope)
+  })
+  if (decision.speak !== true) return
+
+  // 与桌面端共享日预算：同一个账本，今天总共说太多次就不再开口。
+  // 不共享未回应降速——群里没人接话，不代表桌面上也该少说。
+  const fingerprint = `${scope}:${decision.reason}`
+  const sharedGate = await companionService.allowsSharedOpening(fingerprint)
+  if (sharedGate.allowed !== true) {
+    log(`[qq] 主动开口跳过（共享预算：${sharedGate.reason ?? 'unknown'}）`)
+    return
+  }
+
+  try {
+    const result = await chatService.send({
+      text,
+      source: {
+        channel: 'qq',
+        chatType: 'group',
+        openId: info.openId,
+        senderOpenId: info.senderOpenId,
+        msgId: info.msgId,
+        isOwner: false
+      },
+      proactive: { note: buildProactiveNote(decision) }
+    })
+    if (result?.ok !== true) return
+    const reply = typeof result.reply === 'string' ? result.reply.trim() : ''
+    if (reply === '') return
+    // 三个群收到同一句话，是最容易被看穿的破绽：先看别的会话刚说过没有。
+    const duplicate = proactiveGate.findDuplicate(scope, reply)
+    if (duplicate.duplicate) {
+      log(`[qq] 主动开口跳过（与 ${duplicate.scope} 撞车，相似度 ${duplicate.similarity}）`)
+      return
+    }
+    const sent = await channel.replyText('group', info.openId, reply)
+    if (!sent) return
+    proactiveGate.markSpoke(scope, reply)
+    groupLastSpoken.set(scope, { text: reply, at: Date.now() })
+    // 刚说完这一句：八秒内不接下一句，别在群里像复读机。
+    groupManners.noteSpoken(scope)
+    // 主动说出去的话里如果抛了问题，记成待复核的话头：
+    // 对方回来时先判断「这件事是不是已经聊过了」，而不是到点再问一遍。
+    if (/[？?]|吗|呢|要不要|怎么样|好不好/.test(reply)) {
+      proactiveGate.noteOpened(scope, { question: reply.slice(0, 80) })
+    }
+    await companionService.noteSharedOpening(fingerprint)
+    log(`[qq] 主动开口（${decision.reason}）：${reply.slice(0, 40)}`)
+  } catch (error) {
+    log(`[qq] 主动开口失败：${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
 /**
  * 主进程日志：控制台 + userData/logs/main.log。
- *
  * 打包后用户看不到控制台，崩溃、通道失败、素材 404 就只能靠猜。
- * 单文件 5 MB 轮转一次（main.log → main.log.1），写日志失败一律静默，
- * 绝不能因为日志写不进去把主流程带崩。
+ * 单文件 5 MB 轮转，最多保留 3 份归档（main.log.1 ~ .3），总量有硬上限。
+ * 落盘前统一脱敏；写日志失败一律静默，绝不能因为日志写不进去把主流程带崩。
  */
 const logDir = path.join(userData, 'logs')
 const logFilePath = path.join(logDir, 'main.log')
 const LOG_MAX_BYTES = 5 * 1024 * 1024
+/** 除当前文件外最多再保留三份归档。 */
+const LOG_ARCHIVE_COUNT = 3
 let logReady = false
 let logBytes = 0
+
+/** 轮转：删最旧、依次后移，再让当前文件变成 .1。失败时退回清空当前文件。 */
+function rotateLogFile() {
+  try {
+    fsSync.rmSync(`${logFilePath}.${LOG_ARCHIVE_COUNT}`, { force: true })
+  } catch {
+    // 删不掉就交给后面的 rename 失败分支处理
+  }
+  for (let index = LOG_ARCHIVE_COUNT - 1; index >= 1; index -= 1) {
+    try {
+      fsSync.renameSync(`${logFilePath}.${index}`, `${logFilePath}.${index + 1}`)
+    } catch {
+      // 某一份不存在或改名失败，不影响继续轮转
+    }
+  }
+  try {
+    fsSync.renameSync(logFilePath, `${logFilePath}.1`)
+  } catch {
+    try {
+      fsSync.writeFileSync(logFilePath, '')
+    } catch {
+      // 目录只读：退回只有控制台
+    }
+  }
+}
 
 function appendLogFile(line) {
   try {
@@ -385,15 +1691,13 @@ function appendLogFile(line) {
       }
     }
     if (logBytes > LOG_MAX_BYTES) {
-      try {
-        fsSync.renameSync(logFilePath, `${logFilePath}.1`)
-      } catch {
-        fsSync.writeFileSync(logFilePath, '')
-      }
+      rotateLogFile()
       logBytes = 0
     }
-    fsSync.appendFileSync(logFilePath, line)
-    logBytes += Buffer.byteLength(line)
+    // 控制台保留原文；落盘的这一份必须脱敏。
+    const safeLine = redactLogText(line)
+    fsSync.appendFileSync(logFilePath, safeLine)
+    logBytes += Buffer.byteLength(safeLine)
   } catch {
     // 磁盘满 / 目录只读：退回只有控制台
   }
@@ -422,6 +1726,8 @@ function sendBubble(text, motion = null, meta = null) {
     text,
     // AI 挑的动作名；渲染层按素材真实能力决定播不播，null 表示这句不带动作。
     motion: typeof motion === 'string' && motion !== '' ? motion : null,
+    // 可选表情 id：渲染层按素材目录换成图片贴在气泡里，null 表示这句不配图。
+    emojiId: typeof meta?.emojiId === 'string' && meta.emojiId !== '' ? meta.emojiId : null,
     // 可选 ack 键：只有带它的气泡才显示「知道了」，点击后升 confirmed。
     ackSegment:
       typeof meta?.ackSegment === 'string' && meta.ackSegment !== '' ? meta.ackSegment : null
@@ -441,17 +1747,52 @@ const presenceService = createPresenceService({
     const store = requireSecretStore()
     return await store.get(BALANCE_SERVICE, BALANCE_FIELD)
   },
-  getMemoryDigest: () =>
-    buildMemoryDigest({
+  // 主动说话发生在桌面：只取桌面这一桶，群里的事不拿来当主动话题。
+  getMemoryDigest: (text) => {
+    const items = memoryStore.recent(40, 'desktop')
+    return buildMemoryDigest({
       enabled: memoryEnabled(),
       ...memoryStore.stats(),
-      items: memoryStore.recent(40),
-      historyLength: chatService.history().length
-    }),
+      count: items.length,
+      items,
+      historyLength: chatService.history('desktop').length,
+      query: typeof text === 'string' ? text : ''
+    })
+  },
   getPersonaText: (current) => buildPersonaPrompt(current).text,
+  // 真实心情、未完话头、主动说话的表情候选都从陪伴层取，不再由时间硬推。
+  getCompanion: () => companionService,
   // 动作清单来自渲染层每 2 秒的上报；还没上报过就是 null，提示词里不会凭空出现动作。
   getMotionCatalog: () => lastRenderInfo?.motion ?? null,
+  // 身体感觉：开口前先推进到现在；累就是累，不假装精神。
+  getBodyNote: readBodyNote,
+  // 余额与电脑状态：只读现成数据，拿不到就少一句。
+  getEnvironmentNote: readEnvironmentNote,
+  // 纪念日：只在临近时出现，来源必须有原话。
+  getAnniversaryNote: readAnniversaryNote,
+  // 识屏：默认关；打开后十分钟最多读一次，读到多少算多少。
+  getScreenNote: readScreenNote,
   fetchImpl: (url, init) => net.fetch(url, init),
+  log
+})
+
+/**
+ * 观察台快照。
+ *
+ * 七路数据源各自独立：谁没准备好就空着，其它照常给。
+ * 这里只读，不改任何状态；唯一的写入是「这次运行里被叫到几次」。
+ */
+const insight = createInsightService({
+  chatHistoryStore,
+  memoryStore,
+  socialProfileStore,
+  thoughtPool,
+  agendaRuntime,
+  bodyService,
+  presenceService,
+  affinity,
+  proactiveGate,
+  handoffStore,
   log
 })
 
@@ -470,6 +1811,194 @@ const systemStats = createSystemStats({
   }
 })
 
+/**
+ * 余额与电脑状态：只读现成数据，不为这一句话额外拉起采样。
+ *
+ * 余额取账本里最新的一片；电脑状态取 HUD 的采样快照，
+ * 采样过期就当作没看见，不为了知道电量去催 HUD 打开。
+ */
+async function readEnvironmentNote() {
+  const parts = []
+
+  try {
+    if (settings?.modules?.['builtin.balance']?.enabled === true) {
+      const ledger = await ensureBalanceStore().ensureLedger()
+      const slices = ledger?.slices
+      let latest = null
+      if (slices !== null && typeof slices === 'object') {
+        for (const slice of Object.values(slices)) {
+          if (!slice || typeof slice.date !== 'string') continue
+          if (latest === null || slice.date > latest.date) latest = slice
+        }
+      }
+      if (latest !== null) {
+        parts.push(describeBalance({ amount: latest.balance, threshold: latest.threshold }))
+      }
+    }
+  } catch (error) {
+    log('余额提示读取失败', error)
+  }
+
+  try {
+    parts.push(describeSystem(systemStats.snapshot()))
+  } catch (error) {
+    log('系统状态提示读取失败', error)
+  }
+
+  return parts.filter((part) => part !== '').join('')
+}
+
+/** 识屏：十分钟最多读一次；同一块屏幕没必要反复认，也省点电。 */
+const SCREEN_NOTE_TTL_MS = 10 * 60_000
+const SCREEN_OCR_TIMEOUT_MS = 12_000
+let screenNoteCache = { at: 0, text: '' }
+let screenNoteInFlight = null
+let ocrScriptPath = null
+
+async function ensureOcrScript() {
+  if (ocrScriptPath !== null) return ocrScriptPath
+  const dir = path.join(app.getPath('userData'), 'cache')
+  await fs.mkdir(dir, { recursive: true })
+  const file = path.join(dir, 'screen-ocr.ps1')
+  // 带 BOM，老版本 PowerShell 才会按 UTF-8 读这个脚本。
+  await fs.writeFile(file, `\uFEFF${OCR_SCRIPT}`, 'utf8')
+  ocrScriptPath = file
+  return file
+}
+
+function runScreenOcr(script, imagePath, outPath) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        script,
+        '-ImagePath',
+        imagePath,
+        '-OutPath',
+        outPath
+      ],
+      { windowsHide: true, timeout: SCREEN_OCR_TIMEOUT_MS },
+      (error) => {
+        if (error) reject(error)
+        else resolve()
+      }
+    )
+  })
+}
+
+/**
+ * 识屏：把当前屏幕上的字收成一句，交给提示词。
+ *
+ * 默认不读；只有设置里明确打开才动。图片落在自己的 userData 缓存里，
+ * OCR 完就删，不往外传。失败就当没看见，不每轮重试。
+ */
+async function readScreenNote() {
+  if (settings?.presence?.screen?.enabled !== true) return ''
+  if (Date.now() - screenNoteCache.at < SCREEN_NOTE_TTL_MS) return screenNoteCache.text
+  if (screenNoteInFlight !== null) return screenNoteInFlight
+
+  screenNoteInFlight = (async () => {
+    const dir = path.join(app.getPath('userData'), 'cache')
+    const imagePath = path.join(dir, `screen-${process.pid}.png`)
+    const outPath = `${imagePath}.json`
+    try {
+      await fs.mkdir(dir, { recursive: true })
+      const sources = await desktopCapturer.getSources({
+        types: ['screen'],
+        thumbnailSize: { width: 1280, height: 800 }
+      })
+      const primary = screen.getPrimaryDisplay()
+      const source =
+        sources.find((item) => String(item.display_id) === String(primary.id)) ?? sources[0]
+      if (!source || source.thumbnail.isEmpty()) return ''
+
+      await fs.writeFile(imagePath, source.thumbnail.toPNG())
+      const script = await ensureOcrScript()
+      await runScreenOcr(script, imagePath, outPath)
+
+      const raw = await fs.readFile(outPath, 'utf8')
+      const parsed = JSON.parse(raw.replace(/^\uFEFF/, ''))
+      const text = summarizeScreenText(parsed?.lines)
+      screenNoteCache = { at: Date.now(), text }
+      return text
+    } catch (error) {
+      log('识屏读取失败：', error?.message ?? error)
+      // 失败也记一次时间，免得每轮都重试一遍。
+      screenNoteCache = { at: Date.now(), text: '' }
+      return ''
+    } finally {
+      screenNoteInFlight = null
+      await fs.rm(imagePath, { force: true }).catch(() => {})
+      await fs.rm(outPath, { force: true }).catch(() => {})
+    }
+  })()
+
+  return screenNoteInFlight
+}
+
+/** 纪念日：只在临近时说话；只认有原话作证的记录，缺日期就不算。 */
+function readAnniversaryNote() {
+  try {
+    return describeAnniversaries(factStore.snapshot().facts).note
+  } catch (error) {
+    log('纪念日提示读取失败', error)
+    return ''
+  }
+}
+
+/**
+ * 作息：只记「这个点常不常在电脑前」，不记说了什么。
+ *
+ * 文件读写都是尽力而为：读坏了就当作还没认识这个人，写失败了下一拍再写。
+ * 不允许一份作息文件影响主动说话本身。
+ */
+const rhythmFile = path.join(userData, 'presence-rhythm.json')
+let rhythmState = emptyRhythm()
+let rhythmSaveTimer = null
+/** 桌面上一次有人说话的时间；时机模型靠它判断「刚聊完」。 */
+let lastDesktopUserSpokeAt = 0
+
+try {
+  rhythmState = normalizeRhythm(JSON.parse(fsSync.readFileSync(rhythmFile, 'utf8')))
+} catch {
+  rhythmState = emptyRhythm()
+}
+
+function saveRhythmSoon() {
+  if (rhythmSaveTimer !== null) return
+  rhythmSaveTimer = setTimeout(() => {
+    rhythmSaveTimer = null
+    void fs.writeFile(rhythmFile, JSON.stringify(rhythmState)).catch((error) => {
+      log('作息保存失败：', error?.message ?? error)
+    })
+  }, 5_000)
+  rhythmSaveTimer.unref?.()
+}
+
+/** 桌面上有人说话：记一笔作息，顺便把「刚聊完」的计时起点推到现在。 */
+function noteDesktopActivity(scope, at) {
+  if (scope !== 'desktop') return
+  const stamp = Number.isFinite(Number(at)) ? Number(at) : Date.now()
+  lastDesktopUserSpokeAt = stamp
+  rhythmState = recordActivity(rhythmState, stamp)
+  saveRhythmSoon()
+}
+
+/** 系统空闲多久（毫秒）。拿不到就返回 null，不拿它拦人。 */
+function systemIdleMs() {
+  try {
+    const seconds = Number(powerMonitor.getSystemIdleTime())
+    return Number.isFinite(seconds) ? Math.max(0, seconds) * 1000 : null
+  } catch {
+    return null
+  }
+}
+
 let presenceTimer = null
 
 // presenceIntervalMs 已迁到 src/main/state.ts，调用点传原始分钟值。
@@ -484,25 +2013,245 @@ let lastSpokenAt = 0
 /** 锁屏或休眠期间不搭话；唤醒后把计时起点推到现在，不补发。 */
 let systemAsleep = false
 
+/** 有话头到点时把间隔缩到四成，早一点开口；说完就恢复正常节奏。 */
+const LOOP_NUDGE_INTERVAL_SCALE = 0.4
+
+/** 收场多久问一次账本。十分钟足够——收场本来就不是抢时间的事。 */
+const CLOSING_TICK_MS = 10 * 60_000
+let closingTimer = null
+/** 上一拍还没跑完就跳过这一拍，避免同一个会话被连发两句。 */
+let closingBusy = false
+
+/**
+ * 收场：主动说过、很久没人应的会话，把这句话轻轻放下。
+ *
+ * 只处理 QQ 私聊。群里一句话没人接太常见，冒一句「那我去忙了」更突兀；
+ * 桌面气泡本来就是自言自语，也不需要收尾。
+ *
+ * 不走模型：这时候最怕模型自己加戏（追问、道歉、解释），
+ * 也不值得为一个没人看的句号再付一次生成。文案由 pickCloserLine 轮换。
+ */
+async function closingTick() {
+  if (closingBusy) return
+  if (systemAsleep) return
+
+  closingBusy = true
+  try {
+    for (const scope of proactiveGate.scopes()) {
+      // 桌面：她自己在气泡里说过一句，很久没人接，就往回收一句。
+      if (scope === 'desktop') {
+        const desktopDecision = proactiveGate.decideCloser(scope)
+        if (desktopDecision.speak !== true) continue
+        sendBubble(pickCloserLine(desktopDecision.index), null, null)
+        proactiveGate.markClosed(scope)
+        log(`[desktop] 收场（第 ${desktopDecision.index} 次）`)
+        continue
+      }
+
+      // QQ 只处理私聊。群里一句话没人接太常见，隔几小时补一句更突兀。
+      if (!scope.startsWith('qq:private:')) continue
+      const channel = qq
+      if (channel === null || typeof channel.replyText !== 'function') continue
+      const openId = scope.slice('qq:private:'.length)
+      if (openId === '') continue
+      const decision = proactiveGate.decideCloser(scope)
+      if (decision.speak !== true) continue
+
+      const line = pickCloserLine(decision.index)
+      try {
+        const sent = await channel.replyText('private', openId, line)
+        // 只有真发出去才记账，失败留到下一拍再试。
+        if (!sent) continue
+        proactiveGate.markClosed(scope)
+        log(`[qq] 收场（第 ${decision.index} 次）：${line}`)
+      } catch (error) {
+        log(`[qq] 收场失败：${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+  } finally {
+    closingBusy = false
+  }
+}
+
+function startClosingTimer() {
+  if (closingTimer !== null) return
+  closingTimer = setInterval(() => {
+    void closingTick()
+  }, CLOSING_TICK_MS)
+  closingTimer.unref?.()
+}
+
 function startPresenceTimer() {
   if (presenceTimer !== null) return
   presenceTimer = setInterval(() => {
-    if (settings?.presence?.aiEnabled !== true) return
-    if (win === null || win.isDestroyed() || !win.isVisible()) return
-    if (systemAsleep) return
-    // 临时安静（专注模式）：到点自动恢复，不需要改设置。
-    if (isTemporarilyQuiet()) return
-    // 夜间不扰：静音与「只留提醒」都跳过搭话；降频把间隔拉长到 3 倍。
-    const quietMode = quietModeAt(new Date(), settings?.presence?.quiet)
-    if (quietMode === 'silent' || quietMode === 'urgentOnly') return
-    const interval = presenceIntervalMs(settings?.presence?.intervalMinutes) * (quietMode === 'reduce' ? 3 : 1)
-    if (Date.now() - lastSpokenAt < interval) return
-    lastSpokenAt = Date.now()
-    void presenceService.nextLine('auto').then((result) => {
-      if (typeof result.line === 'string' && result.line !== '') sendBubble(result.line, result.motion)
-    })
+    void presenceTick()
   }, 30_000)
   presenceTimer.unref?.()
+}
+
+/**
+ * 挑一条今天可以说的念头：先排掉刚攒下的，再按分量、再按新旧。
+ * 读不到池子不影响主动开口，只是退回日程与话头。
+ */
+function nextSpeakableThought() {
+  try {
+    const now = Date.now()
+    const open = thoughtPool.list({ scope: 'desktop', status: 'open', limit: 20 })
+    return (
+      open
+        .filter((item) => now - item.createdAt >= THOUGHT_MIN_AGE_MS)
+        .sort(
+          (left, right) =>
+            Number(right.weight ?? 0) - Number(left.weight ?? 0) || right.createdAt - left.createdAt
+        )[0] ?? null
+    )
+  } catch (error) {
+    log(`[desktop] 读取念头池失败：${error instanceof Error ? error.message : String(error)}`)
+    return null
+  }
+}
+
+async function presenceTick() {
+  if (settings?.presence?.aiEnabled !== true) return
+  if (win === null || win.isDestroyed() || !win.isVisible()) return
+  if (systemAsleep) return
+  // 临时安静（专注模式）：到点自动恢复，不需要改设置。
+  if (isTemporarilyQuiet()) return
+  // 夜间不扰：静音与「只留提醒」都跳过搭话；降频把间隔拉长到 3 倍。
+  const quietMode = quietModeAt(new Date(), settings?.presence?.quiet)
+  if (quietMode === 'silent' || quietMode === 'urgentOnly') return
+
+  // 时机：刚聊完、人不在电脑前，都先让出这一拍。
+  // 常聊的时段可以早一点，深夜则明显慢一点；尺度由 timing 统一算。
+  const timing = assessTiming({
+    now: Date.now(),
+    lastUserSpokeAt: lastDesktopUserSpokeAt,
+    idleMs: systemIdleMs(),
+    rhythm: rhythmState
+  })
+  if (timing.speak !== true) {
+    log(`[desktop] 这一拍时机不对（${timing.reason}）`)
+    return
+  }
+
+  // 主动说话前顺手确保今天的节目单在；不等它，先按现有安排说话。
+  // 生成成功要几秒，下一拍才会用上；失败就继续沿用昨天的结构。
+  void dailyPlanService.ensure()
+
+  // 有放置够久、还没回访过的话头时，允许提前一次。
+  const loop =
+    typeof companionService?.pendingLoop === 'function' ? await companionService.pendingLoop() : null
+
+  // 开口账本：每天有上限；连续开口、对方一直没接话时把间隔拉长。
+  const pacing =
+    typeof companionService?.openingPacing === 'function'
+      ? await companionService.openingPacing()
+      : null
+  if (pacing?.blockedReason === 'daily_limit') return
+
+  const scale = loop !== null ? LOOP_NUDGE_INTERVAL_SCALE : 1
+  const answeredScale =
+    typeof pacing?.intervalScale === 'number' && pacing.intervalScale > 0 ? pacing.intervalScale : 1
+  const interval =
+    presenceIntervalMs(settings?.presence?.intervalMinutes) *
+    (quietMode === 'reduce' ? 3 : 1) *
+    scale *
+    answeredScale *
+    timing.scale
+  // 重启后也要认上一次开口时间，避免刚打开就立刻搭话。
+  const lastSpoken = Math.max(
+    lastSpokenAt,
+    typeof pacing?.lastSpokenAt === 'number' ? pacing.lastSpokenAt : 0
+  )
+  if (Date.now() - lastSpoken < interval) return
+
+  // 陪伴层先回答「这一拍为什么开口」：日程段落、未完话头、很久没联系。
+  // 先有由头，再过闸门；没有由头就不硬找话题，这一拍安静地过去。
+  // 身体状态也参与判断：睡着了、精力见底就安静过去，只是累了先不挑日常话题。
+  let body = null
+  if (settings?.companion?.body?.enabled !== false) {
+    await bodyService.tick()
+    body = bodyService.snapshot()
+  }
+  // 念头池排在最前：先挑一条攒了二十分钟以上、还没说过的。
+  const thought = nextSpeakableThought()
+  const opening = await companionService.pickOpening({ body, thought })
+  const cue = resolveOpeningCue({
+    opening,
+    loop,
+    now: Date.now(),
+    lastSpokeAt: lastSpoken
+  })
+  const cueDecision = proactiveGate.decideByCue('desktop', cue)
+  const focusText = opening !== null ? opening.note : (loop?.text ?? '')
+  if (cueDecision.speak !== true) {
+    log(`[desktop] 这一拍没有开口（${cueDecision.reason}）`)
+    try {
+      thoughtPool.recordDecision({
+        scope: 'desktop',
+        speak: false,
+        source: opening?.kind ?? 'none',
+        reason: cueDecision.reason,
+        text: focusText,
+        thoughtId: opening?.thoughtId ?? ''
+      })
+    } catch {
+      // 观察台少一条记录没关系，别影响这一拍。
+    }
+    return
+  }
+  // 只有真的通过闸门才占用间隔，否则「没有由头」会被每 12 分钟重置一次。
+  lastSpokenAt = Date.now()
+
+  const result = await presenceService.nextLine(loop !== null ? 'loop' : 'auto', focusText)
+  if (typeof result.line === 'string' && result.line !== '') {
+    sendBubble(result.line, result.motion, { emojiId: result.emojiId })
+    // 桌面气泡也算一次「主动说过」：很久没人接时，收场会往回收一句。
+    // 只记在 desktop 这一本账上，不影响 QQ 的开口额度。
+    proactiveGate.markSpoke('desktop', result.line)
+    // 说过的话要留在记忆里。不写回去，她下次就不知道自己昨晚随口提过什么，
+    // 会像没发生过一样重新开场。只记自己这一句，不替对方编回应。
+    if (memoryEnabled()) {
+      memoryStore.appendTurn('assistant', result.line, new Date().toISOString(), null, 'desktop')
+    }
+    // 日程段落说完就认领，同一段今天不再重复提。
+    if (opening !== null && opening.segmentId !== null) await companionService.claimAgenda()
+    // 真正说出口之后才记为回访过；没说出话就留到下一拍再试。
+    if (loop !== null) companionService.markLoopNudged(loop.id)
+    // 一条念头说出去就收起来，之后不再拿同一件事开场。
+    if (opening !== null && opening.thoughtId !== null) {
+      thoughtPool.markUsed(opening.thoughtId, { scope: 'desktop' })
+    }
+    // 机会账本只在真正开口后记账；空回复不占今天的额度。
+    if (opening !== null) await companionService.noteSpoken?.(opening, result.line)
+    try {
+      thoughtPool.recordDecision({
+        scope: 'desktop',
+        speak: true,
+        source: opening?.kind ?? 'none',
+        gate: 'open',
+        reason: cueDecision.reason,
+        text: result.line,
+        thoughtId: opening?.thoughtId ?? ''
+      })
+    } catch {
+      // 同上：记录失败不打扰已经说出口的话。
+    }
+  } else {
+    try {
+      thoughtPool.recordDecision({
+        scope: 'desktop',
+        speak: false,
+        source: opening?.kind ?? 'none',
+        reason: 'empty_reply',
+        text: focusText,
+        thoughtId: opening?.thoughtId ?? ''
+      })
+    } catch {
+      // 同上。
+    }
+    if (opening !== null) await companionService.noteOpeningFailed?.(opening)
+  }
 }
 
 /** 由 registerIpc 注入的日报执行入口；定时器通过它触发，不复制第二套逻辑。 */
@@ -784,6 +2533,35 @@ function ensureGameDailyService() {
   return gameDailyService
 }
 
+/**
+ * 多游戏日常宿主：state.json + 计划任务 + 运行记录。
+ * runner 的路径跟着安装目录走，工作目录留给 app 根，方便 runner 解析 @pet/core。
+ */
+let gameDailyStore = null
+
+function ensureGameDailyStore() {
+  if (gameDailyStore === null) {
+    gameDailyStore = createGameDailyStore({
+      stateDir: path.join(userData, 'game-daily'),
+      runnerPath: path.join(__dirname, 'game-daily-runner.mjs'),
+      projectRoot: app.getAppPath()
+    })
+  }
+  return gameDailyStore
+}
+
+/** 游戏助手单例：风险门、周常账本、任务目录。默认关闭。 */
+let gameAssistantService = null
+
+function ensureGameAssistantService() {
+  if (gameAssistantService === null) {
+    gameAssistantService = createGameAssistantService({
+      filePath: path.join(userData, 'game-assistant.json')
+    })
+  }
+  return gameAssistantService
+}
+
 function sendDecision(outcome) {
   if (win === null || win.isDestroyed()) return
   win.webContents.send('pet:decision', outcome)
@@ -877,9 +2655,12 @@ async function createGateway() {
   // 环境变量配置齐全时视为显式启用，保持旧版本行为；否则看设置开关。
   const enabled =
     (envAppId.length > 0 && envSecret.length > 0) || qqSettings.enabled === true
+  // 网关模式允许「先连上、再绑定」：主人名单为空时只记录来源，不接受拍板。
+  const observeOnly = enabled && transport === 'gateway' && ownerOpenIds.length === 0
   setQqRuntime({
     enabled,
     transport,
+    observeOnly,
     state: enabled ? 'starting' : 'off',
     reason: enabled ? '' : 'QQ 通道未启用',
     webhookListening: false,
@@ -909,17 +2690,58 @@ async function createGateway() {
     } else if (clientSecret.length === 0) {
       setQqRuntime({ state: 'error', reason: '缺少 AppSecret（Vault 里没有对应条目）' })
       log('[qq] 未启用：缺少 AppSecret（Vault 里没有对应条目）')
-    } else if (ownerOpenIds.length === 0) {
-      // 没有主人名单时，任何消息都无法确认来源，通道保持不启用。
-      setQqRuntime({ state: 'error', reason: '缺少主人 openid，无法判断谁可以拍板' })
-      log('[qq] 未启用：缺少主人 openid，无法判断谁可以拍板')
     } else if (transport === 'gateway') {
+      // 主人名单为空时不再直接放弃：先连上记录来源，用户在设置页绑定后自动转正。
+      if (observeOnly) {
+        setQqRuntime({
+          observeOnly: true,
+          reason: '观察模式：还没有主人 openid，先在 QQ 里发一条消息，再回设置页绑定'
+        })
+        log('[qq] 观察模式：未设置主人 openid，仅记录入站来源，不接受拍板')
+      }
       const channel = new QqGatewayChannel({
         appId,
         clientSecret,
         ownerOpenIds,
         ...(targetOpenId.length === 0 ? {} : { targetOpenId }),
         onLog: (message) => log(message),
+        // 只记录来源；能不能拍板仍由 owners 集合决定，这里不放宽任何权限。
+        onInbound: (info) => {
+          setQqRuntime({ lastInboundOpenId: info.senderOpenId, lastInboundAt: Date.now() })
+          log(`[qq] 入站来源 openid=${info.senderOpenId}（${info.chatType}）`)
+          // 群里的分寸从入站就开始记：热不热闹、同一条有没有重复推，
+          // 都要靠每一条消息，而不只是最后决定要回的那几条。
+          if (info.chatType === 'group') {
+            const groupScope = `qq:group:${info.openId}`
+            if (groupManners.duplicate(groupScope, info.msgId)) {
+              log('[qq] 跳过重复推送的群消息')
+              return
+            }
+            groupManners.observe({
+              scope: groupScope,
+              senderOpenId: info.senderOpenId,
+              msgId: info.msgId
+            })
+          }
+          // 主人自己的话走正常回复，不再抢一次主动开口；
+          // 被 @ 的消息已经走回复通道，同样跳过；
+          // 观察模式（还没绑定主人）也不主动对陌生人说话。
+          if (info.mentioned === true) return
+          if (!observeOnly && !ownerOpenIds.includes(info.senderOpenId)) {
+            void maybeSpeakInGroup(info)
+          }
+        },
+        // 主人的普通消息，以及群里任何人对她的 @，都进聊天链路；
+        // 观察模式与没被 @ 的陌生人消息不会触发这里。
+        onMessage: (info) => {
+          void handleQqChat(info)
+        },
+        // 进群 / 退群决定了之后还有没有群消息可收。
+        // 群里突然安静时，先看日志里有没有这一条，能直接排除「人已经不在群里」。
+        onSystemEvent: (event) => {
+          const label = event.type === 'GROUP_ADD_ROBOT' ? '进群' : '被移出群'
+          log(`[qq] 机器人${label} group=${event.groupOpenId}`)
+        },
         onError: (error) => {
           setQqRuntime({ state: 'error', reason: `网关错误：${error.message}` })
         }
@@ -927,7 +2749,11 @@ async function createGateway() {
       channel.onReadyChange?.((ready) => {
         setQqRuntime({
           state: ready ? 'ready' : 'error',
-          reason: ready ? '' : '网关连接已断开，正在重连'
+          reason: ready
+            ? observeOnly
+              ? '已连接（观察模式）：在 QQ 里发一条消息，再回设置页绑定主人'
+              : ''
+            : '网关连接已断开，正在重连'
         })
       })
       try {
@@ -935,7 +2761,10 @@ async function createGateway() {
         qq = channel
         // start() 只负责建连，不等握手；错误回调可能已经先写入 error，不能覆盖。
         if (channel.isReady === true) {
-          setQqRuntime({ state: 'ready', reason: '' })
+          setQqRuntime({
+            state: 'ready',
+            reason: observeOnly ? '已连接（观察模式）：在 QQ 里发一条消息，再回设置页绑定主人' : ''
+          })
         } else if (qqRuntime.state !== 'error') {
           setQqRuntime({ state: 'starting', reason: '正在连接 QQ 网关' })
         }
@@ -946,6 +2775,10 @@ async function createGateway() {
         setQqRuntime({ state: 'error', reason: `网关启动失败：${message}` })
         log('[qq] 网关启动失败：', message)
       }
+    } else if (ownerOpenIds.length === 0) {
+      // webhook 拿不到来源回传，做不了「先连后绑」，仍要求先填主人。
+      setQqRuntime({ state: 'error', reason: '缺少主人 openid，webhook 模式需要先填写' })
+      log('[qq] 未启用：webhook 模式缺少主人 openid')
     } else if (publicKey.length === 0) {
       // 没有公钥就无法验签，webhook 等于对任何能连上端口的人敞开。
       setQqRuntime({ state: 'error', reason: '缺少 QQ 公钥，webhook 无法验签' })
@@ -1221,10 +3054,36 @@ async function initVault() {
 
     const memoryLoaded = await memoryStore.load()
     log('记忆已加载：', JSON.stringify(memoryLoaded))
+    // 记忆整理：启动时先扫一次，之后每天一次。只归档久未想起的原文，
+    // 事实和经验不动，归档内容仍留在磁盘上、管理页可查。
+    if (memoryLoaded.ok) {
+      const swept = memoryStore.sweep()
+      if (swept.archived > 0) log('记忆整理：归档', swept.archived, '条')
+      const sweepTimer = setInterval(() => {
+        const result = memoryStore.sweep()
+        if (result.archived > 0) log('记忆整理：归档', result.archived, '条')
+      }, 24 * 60 * 60 * 1000)
+      sweepTimer.unref?.()
+    }
 
     const historyLoaded = await chatHistoryStore.load()
     const restored = chatService.hydrate(chatHistoryStore.recent(200))
     log('聊天历史已加载：', JSON.stringify({ ...historyLoaded, restored }))
+    // 旧聊天里明确的自我陈述整理成记忆线索：标成「被问到再说」，不急着端出来。
+    // 已经记过的条目会跳过，所以每次启动跑一遍也不会把强度刷高。
+    try {
+      const factLoaded = await factStore.load()
+      if (factLoaded.ok === true) {
+        await importHistoryCandidates({
+          messages: chatHistoryStore.recent(200),
+          factStore,
+          scope: 'desktop',
+          log: (message) => log(`[history] ${message}`)
+        })
+      }
+    } catch (error) {
+      log('历史聊天整理失败', error)
+    }
   } catch (error) {
     vault = null
     vaultClient = null
@@ -1322,10 +3181,11 @@ async function initSettingsSync() {
 
 /**
  * pet-media://<host>/<相对路径> → 对应根目录下的真实文件。
- * 三个 host：
+ * 四个 host：
  *   model → mediaRoot（userData/models，Live2D 模型）
  *   asset → assetsRoot（随包表情与立绘）
  *   pack  → packsRoot（用户导入）或内置包根（builtin- 前缀）
+ *   inbox → packsRoot/.inbox（QQ 偷图待审核，单层文件名）
  * 解析后必须仍在对应根内 —— 挡住 ../ 穿越读别处的文件。
  */
 function registerMediaProtocol() {
@@ -1337,8 +3197,11 @@ function registerMediaProtocol() {
     let viaPackStore = false
     try {
       const url = new URL(request.url)
-      root = roots[url.host]
-      if (root === undefined) {
+      // 照片目录是运行期才定的，跟着拍照模块走。
+      root = url.host === 'photo' ? photoRootDir : roots[url.host]
+      // inbox 不在 roots 表里：它的根是 packsRoot/.inbox，由 stickerInbox 自己管。
+      // photo 的根在拍照模块创建后才有值，没值就当不存在，不拿空串去拼路径。
+      if ((root === undefined || root === '') && url.host !== 'inbox') {
         log('[media] 拒绝未知前缀请求', request.url)
         return new Response('not found', { status: 404 })
       }
@@ -1346,8 +3209,15 @@ function registerMediaProtocol() {
       if (relative === '' || relative.includes('\0')) {
         return new Response('not found', { status: 404 })
       }
-      // pack 路径交给 packStore：内置包落在另一个根，由它按 id 前缀分流并做边界校验。
-      if (url.host === 'pack') {
+      if (url.host === 'inbox') {
+        const resolved = await stickerInbox.resolvePath(relative)
+        if (resolved === null) {
+          log('[media] 拒绝越界待审核请求', request.url)
+          return new Response('forbidden', { status: 403 })
+        }
+        target = resolved
+        viaPackStore = true
+      } else if (url.host === 'pack') {
         const slash = relative.indexOf('/')
         if (slash <= 0) return new Response('not found', { status: 404 })
         const packId = relative.slice(0, slash)
@@ -1423,6 +3293,7 @@ function registerIpc() {
     getLastRenderInfo: () => lastRenderInfo,
     modelStore,
     packStore,
+    stickerInbox,
     assetLibrary,
     systemStats,
     presenceService,
@@ -1464,6 +3335,10 @@ function registerIpc() {
           ? win
           : undefined,
     packStore,
+    stickerInbox,
+    stickerLibrary,
+    openStickerWindow,
+    sendQqSticker,
     getSettings: () => settings,
     setSettings: (next) => {
       settings = next
@@ -1618,6 +3493,20 @@ function registerIpc() {
   registerChatChannels({
     registerChannel,
     getChatService: () => chatService,
+    // 聊天里被要照片时先真拍一张；不是要照片就返回 null，一句话都不改。
+    takePhotoIfAsked: async (text) => {
+      if (!wantsSelfie(text)) return null
+      const shot = await photoStudio.take()
+      if (shot.ok !== true) return { ok: false, reason: shot.reason }
+      return {
+        ok: true,
+        photo: {
+          url: photoMediaUrl(shot.photo.path, photoStudio.folder()),
+          path: shot.photo.path,
+          at: shot.photo.at
+        }
+      }
+    },
     openChatWindow,
     showSaveDialog: (options) => dialog.showSaveDialog(options),
     getDocumentsPath: () => app.getPath('documents'),
@@ -1658,10 +3547,37 @@ function registerIpc() {
     memoryStore,
     collectMemoryAll,
     sanitizeReflectionText,
+    // 结构化事实只读展示：设置页「她记住的事」用，不参与原文分页。
+    factStore,
     dialog,
     documentsDir: app.getPath('documents'),
     pathJoin: (...parts) => path.join(...parts),
     writeFile: (file, data, encoding) => fs.writeFile(file, data, encoding),
+    // 导入备份要读整份文件；回调式 fs 包一层，通道层只关心结果。
+    readFile: (file, encoding) =>
+      new Promise((resolve, reject) => {
+        fs.readFile(file, encoding, (error, data) => {
+          if (error !== null && error !== undefined) reject(error)
+          else resolve(String(data))
+        })
+      }),
+    log
+  })
+
+  // 陪伴日程：只读今天这份单，以及手动把后续安排顺延。
+  registerCompanionAgendaChannels({
+    registerChannel,
+    companionService,
+    log
+  })
+
+  // 观察台：只读快照与三个单会话动作，窗口只开一个。
+  registerInsightChannels({
+    registerChannel,
+    openWindow: openInsightWindow,
+    insight,
+    affinity,
+    memory: memoryStore,
     log
   })
 
@@ -1711,7 +3627,8 @@ function registerIpc() {
     if (settings?.presence?.aiEnabled !== true) return { ok: false, reason: 'disabled' }
     presenceService.noteContact()
     const result = await presenceService.nextLine(typeof reason === 'string' ? reason : 'manual')
-    if (typeof result.line === 'string' && result.line !== '') sendBubble(result.line, result.motion)
+    if (typeof result.line === 'string' && result.line !== '')
+      sendBubble(result.line, result.motion, { emojiId: result.emojiId })
     return result
   })
 
@@ -1775,7 +3692,44 @@ function registerIpc() {
         listening: qqRuntime.webhookListening,
         port: qqRuntime.webhookPort,
         error: qqRuntime.webhookError
+      },
+      observeOnly: qqRuntime.observeOnly,
+      lastInboundOpenId: qqRuntime.lastInboundOpenId,
+      lastInboundAt: qqRuntime.lastInboundAt
+    }
+  })
+
+  // 运行状态四张卡片一次取齐：QQ / 记忆 / 今天主动 / 上次反思。
+  // 只读，不触发重连、不发起模型请求。
+  registerChannel('pet:status:summary', async () => {
+    const pacing =
+      typeof companionService?.openingPacing === 'function'
+        ? await companionService.openingPacing().catch(() => null)
+        : null
+    const memoryStats = memoryStore.stats()
+    let lastReflectionAt = null
+    try {
+      const dir = path.join(userData, 'notes', 'reflection')
+      const files = (await fs.readdir(dir)).filter((name) => /^\d{4}-\d{2}-\d{2}\.md$/.test(name))
+      files.sort()
+      if (files.length > 0) {
+        const stat = await fs.stat(path.join(dir, files[files.length - 1]))
+        lastReflectionAt = stat.mtime.toISOString()
       }
+    } catch {
+      // 还没写过反思时目录不存在，保持 null，不补一个假时间。
+    }
+    return {
+      qq: {
+        enabled: qqRuntime.enabled,
+        state: qqRuntime.state,
+        reason: qqRuntime.reason,
+        observeOnly: qqRuntime.observeOnly
+      },
+      memory: memoryStats,
+      proactive: pacing === null ? null : { spokenToday: pacing.spokenToday ?? 0 },
+      reflection: { lastAt: lastReflectionAt },
+      memoryGuard: memoryGuard.status()
     }
   })
 
@@ -1805,6 +3759,31 @@ function registerIpc() {
         message: error instanceof Error ? error.message : String(error)
       }
     }
+  })
+
+  // 一键绑定：把最近一条入站消息的发送者写进主人名单，并立刻重建网关。
+  // 没有入站记录时明确回 no-inbound，让界面提示「先去 QQ 发一条」。
+  registerChannel('pet:qq:bind-owner', async () => {
+    const openId = qqRuntime.lastInboundOpenId.trim()
+    if (openId === '') return { ok: false, reason: 'no-inbound' }
+    const qqSettings = settings.channels?.qq ?? DEFAULT_SETTINGS.channels.qq
+    const owners = [...(qqSettings.ownerOpenIds ?? [])]
+    if (owners.includes(openId)) {
+      return { ok: true, openId, alreadyBound: true, ownerOpenIds: owners }
+    }
+    owners.push(openId)
+    settings = mergeLayer(settings, { channels: { qq: { ownerOpenIds: owners } } })
+    try {
+      await writeSettings(settings)
+    } catch (error) {
+      return { ok: false, reason: 'write-failed', message: describeError(error) }
+    }
+    broadcastSettings(settings)
+    await syncGatewayIfNeeded(true).catch((error) =>
+      log('[qq] 绑定后重建通道失败：', describeError(error))
+    )
+    log(`[qq] 已将 ${openId} 绑定为主人 openid`)
+    return { ok: true, openId, alreadyBound: false, ownerOpenIds: owners }
   })
 
   // 能力中心：独立窗口。窗口本身只读状态与触发动作，不持有额外权限。
@@ -1839,12 +3818,56 @@ function registerIpc() {
   registerChannel('pet:game:schedule:save', async (_event, config) =>
     ensureGameDailyService().save(config)
   )
+
+  // 多游戏日常：一行一个游戏，真实执行交给 runner + Windows 计划任务。
+  // 注册/删除任务会走 UAC，注册结果一律用 query 回读，不认退出码。
+  registerChannel('pet:game:daily:state', () => ensureGameDailyStore().load())
+  registerChannel('pet:game:daily:update', (_event, input) => ensureGameDailyStore().update(input))
+  registerChannel('pet:game:daily:plan', () => ensureGameDailyStore().plan())
+  registerChannel('pet:game:daily:apply', () => ensureGameDailyStore().apply())
+  registerChannel('pet:game:daily:query', () => ensureGameDailyStore().query())
+  registerChannel('pet:game:daily:disable', (_event, games) => ensureGameDailyStore().disable(games))
+  registerChannel('pet:game:daily:runs', (_event, input) =>
+    ensureGameDailyStore().runs(input?.game, input?.limit)
+  )
   registerChannel('pet:game:dry-run', (_event, config) =>
     ensureGameDailyService().dryRun(config)
   )
 
+  // 游戏助手：默认关闭，必须连续两次确认风险才能生成任务计划。
+  registerChannel('pet:game:assistant:status', () => ensureGameAssistantService().status())
+  registerChannel('pet:game:assistant:confirm', (_event, input) =>
+    ensureGameAssistantService().confirm(input)
+  )
+  registerChannel('pet:game:assistant:disable', () => ensureGameAssistantService().disable())
+  registerChannel('pet:game:assistant:record', (_event, entry) =>
+    ensureGameAssistantService().recordRun(entry)
+  )
+  registerChannel('pet:game:assistant:claim', (_event, id) =>
+    ensureGameAssistantService().claim(id)
+  )
+  registerChannel('pet:game:assistant:rank', (_event, rank) =>
+    ensureGameAssistantService().setRank(rank)
+  )
+  registerChannel('pet:game:assistant:plan', (_event, taskId) =>
+    ensureGameAssistantService().plan(taskId)
+  )
+
   registerChannel('pet:settings:close', () => {
     if (settingsWin !== null && !settingsWin.isDestroyed()) settingsWin.close()
+    return true
+  })
+
+  // 设置窗自绘顶栏：关闭之外，最小化与最大化也由渲染侧按钮触发。
+  registerChannel('pet:settings:minimize', () => {
+    if (settingsWin !== null && !settingsWin.isDestroyed()) settingsWin.minimize()
+    return true
+  })
+
+  registerChannel('pet:settings:toggleMaximize', () => {
+    if (settingsWin === null || settingsWin.isDestroyed()) return false
+    if (settingsWin.isMaximized()) settingsWin.unmaximize()
+    else settingsWin.maximize()
     return true
   })
 
@@ -1867,9 +3890,53 @@ function registerIpc() {
     return true
   }
 
+  /**
+   * 拍照：她此刻的样子直接截自桌宠窗口，不需要另找图源。
+   * 目录默认放 D 盘；拍完在资源管理器里选中，用户能立刻看见成品。
+   * 截不到就返回失败，不拿占位图冒充。
+   */
+  const photoFolderDir = resolvePhotoFolder({
+    preferred: process.env.DSH_PET_PHOTO_DIR ?? '',
+    fallback: path.join('D:\\', 'DSH Pet', 'photos')
+  })
+  // 媒体协议按这个根读图：渲染层只拿到 pet-media://photo/<文件名>。
+  photoRootDir = photoFolderDir
+  const photoStudio = createPhotoStudio({
+    folder: photoFolderDir,
+    capture: async () => {
+      if (win === null || win.isDestroyed()) return null
+      const image = await win.webContents.capturePage()
+      if (image === null || image.isEmpty()) return null
+      return image.toPNG()
+    },
+    log
+  })
+
+  registerChannel('pet:photo:take', async () => await photoStudio.take())
+
   registerChannel('pet:menu:context', () => {
     const menu = Menu.buildFromTemplate([
       { label: '聊天…', click: () => openChatWindow() },
+      // 拍的是她自己：窗口里那块立绘原样落成一张 PNG。
+      {
+        label: '拍一张照',
+        click: async () => {
+          const result = await photoStudio.take()
+          if (result.ok === true) {
+            shell.showItemInFolder(result.photo.path)
+            return
+          }
+          const why =
+            {
+              'no-capture': '现在没有可截的画面',
+              'no-folder': '还没定照片存在哪儿',
+              'empty-frame': '这一帧是空的，窗口可能被盖住了',
+              'capture-failed': '截屏时出错了',
+              'write-failed': '写文件失败了，可能磁盘满了或没有权限'
+            }[result.reason] ?? '这次没拍成'
+          dialog.showErrorBox('没能拍下来', why)
+        }
+      },
       { label: '把桌宠找回来', click: () => dockPetToBottomRight() },
       { label: '设置', click: () => openSettingsWindow('general') },
       { type: 'separator' },
@@ -1968,27 +4035,12 @@ function registerIpc() {
     const [wx, wy] = win.getPosition()
     const offsetX = cursor.x - wx
     const offsetY = cursor.y - wy
-    dragBounds = win.getBounds()
-    // 拖动期间关掉可缩放：Windows 会按 DPI 重算窗口外框，每帧给宽度加 2px。
-    win.setResizable(false)
+    // 拖动期间只改位置。setResizable / getSize / setBounds 都会让 Windows
+    // 重新计算窗口外框，透明窗口跟着重绘时就会闪一下、并露出边缘白条。
     dragTimer = setInterval(() => {
       if (win === null || win.isDestroyed()) return
       const point = screen.getCursorScreenPoint()
-      const nextX = Math.round(point.x - offsetX)
-      const nextY = Math.round(point.y - offsetY)
-      if (dragBounds === null) {
-        win.setPosition(nextX, nextY)
-        return
-      }
-      const [width, height] = win.getSize()
-      // 1px 的偏差先放过：每帧写回会再触发一次 resize，画布跟着重建就是闪。
-      // 攒到 2px 以上才连尺寸一起写回，拖动结束再收口。
-      const drift = Math.abs(width - dragBounds.width) + Math.abs(height - dragBounds.height)
-      if (drift < 2) {
-        win.setPosition(nextX, nextY)
-      } else {
-        win.setBounds({ x: nextX, y: nextY, width: dragBounds.width, height: dragBounds.height })
-      }
+      win.setPosition(Math.round(point.x - offsetX), Math.round(point.y - offsetY))
     }, 16)
     return true
   })
@@ -2000,76 +4052,9 @@ function registerIpc() {
     }
     if (win === null || win.isDestroyed()) return false
 
-    // 先把尺寸收回拖动开始时的值；窗口固定尺寸，不再恢复可缩放。
-    if (dragBounds !== null) {
-      const [x, y] = win.getPosition()
-      win.setBounds({ x, y, width: dragBounds.width, height: dragBounds.height })
-      dragBounds = null
-    }
-
-    // 先吸附再判速度：慢速松手也要能贴边，而慢速分支会直接返回。
-    applyEdgeSnap()
-
-    // 速度单位 px/ms。低速松手直接停住。
-    // 原来阈值 0.35 太低：慢慢往左拖一段也会被当成抛掷，松手后继续飘几十像素，
-    // 观感就是「滑翔」。提到 0.55 后，只有明确甩出去才给惯性。
-    const rawX = typeof velocity?.vx === 'number' ? velocity.vx : 0
-    const rawY = typeof velocity?.vy === 'number' ? velocity.vy : 0
-    if (!Number.isFinite(rawX) || !Number.isFinite(rawY)) return true
-    if (Math.hypot(rawX, rawY) < 0.55) return true
-
+    // 松手就停在原地：不做惯性滑行，也不自动贴边。
+    dragBounds = null
     stopFling()
-    let vx = rawX
-    let vy = rawY
-    const bounds = screen.getDisplayMatching(win.getBounds()).workArea
-    const [w, h] = win.getSize()
-    // 摩擦 0.92 → 0.84，停止阈值 0.02 → 0.05：同样初速下滑行距离约减半。
-    const FRICTION = 0.84
-    const STOP = 0.05
-
-    flingTimer = setInterval(() => {
-      if (win === null || win.isDestroyed()) {
-        stopFling()
-        return
-      }
-      const [x, y] = win.getPosition()
-      let nextX = x + vx * 16
-      let nextY = y + vy * 16
-
-      // 撞到工作区边界就直接停，不反弹。
-      // 反弹会让贴边后来回弹几下，比直接停更像故障，也加重「还在飘」的观感。
-      let hitEdge = false
-      if (nextX < bounds.x) {
-        nextX = bounds.x
-        hitEdge = true
-      } else if (nextX + w > bounds.x + bounds.width) {
-        nextX = bounds.x + bounds.width - w
-        hitEdge = true
-      }
-      if (nextY < bounds.y) {
-        nextY = bounds.y
-        hitEdge = true
-      } else if (nextY + h > bounds.y + bounds.height) {
-        nextY = bounds.y + bounds.height - h
-        hitEdge = true
-      }
-
-      // 和拖动一样：移动过程中系统会偷加 2px，尺寸不一致时连尺寸一起写回。
-      const [currentWidth, currentHeight] = win.getSize()
-      if (currentWidth === w && currentHeight === h) {
-        win.setPosition(Math.round(nextX), Math.round(nextY))
-      } else {
-        win.setBounds({ x: Math.round(nextX), y: Math.round(nextY), width: w, height: h })
-      }
-      if (hitEdge) {
-        stopFling()
-        return
-      }
-
-      vx *= FRICTION
-      vy *= FRICTION
-      if (Math.hypot(vx, vy) < STOP) stopFling()
-    }, 16)
     return true
   })
 
@@ -2213,6 +4198,83 @@ function registerIpc() {
     }
   })
 
+  /**
+   * 恢复出厂设置：设置写回默认、清空记忆与聊天记录、移除所有外部服务密钥，
+   * 然后重启回到首次引导。备份文件、素材包、模型与日志都不在清理范围内。
+   */
+  registerChannel('pet:factory:reset', async () => {
+    log('[factory] 开始恢复出厂设置')
+
+    // 先写默认设置：后面哪一步失败，下次启动也仍然停在引导页。
+    settings = structuredClone(DEFAULT_SETTINGS)
+    await writeSettings(settings)
+
+    // 内存与磁盘一起清；放在退出落盘之前，避免旧内容被 before-quit 的 flush 写回来。
+    await Promise.allSettled([
+      memoryStore.clear(),
+      chatHistoryStore.clear(),
+      factStore.reset(),
+      speechHabits.clear(),
+      companionService.reset()
+    ])
+    await Promise.allSettled([
+      memoryStore.flush(),
+      chatHistoryStore.flush(),
+      factStore.flush(),
+      speechHabits.flush(),
+      companionService.flush()
+    ])
+
+    // 外部服务密钥逐个清空；密钥环本身保留，避免其它已加密文件全部解不开。
+    if (secretStore !== null) {
+      try {
+        for (const serviceId of await secretStore.listConfigured()) {
+          await secretStore.clearService(serviceId)
+        }
+      } catch (error) {
+        log('[factory] 清理服务密钥失败：', error?.message ?? error)
+      }
+    }
+
+    // 自动备份口令只删口令文件；已导出的 .petbackup 与同步口令由上面统一清掉。
+    await fs.rm(backupSecretFile, { force: true }).catch(() => undefined)
+    await saveBackupPrefs({ lastRunAt: '' }).catch(() => undefined)
+
+    // 剩下的陪伴状态、日记与好感仍各自落在独立文件里；恢复出厂一并清掉。
+    // 备份目录、同步目录、素材包与模型目录都不在这里，用户导出的东西保持原样。
+    const residualFiles = [
+      `${settingsPath}.bak`,
+      statePath,
+      path.join(userData, 'affinity.json'),
+      path.join(userData, 'affinity.json.bak'),
+      path.join(userData, 'thoughts.json'),
+      path.join(userData, 'thoughts.json.bak'),
+      path.join(userData, 'agenda-runtime.json'),
+      path.join(userData, 'agenda-runtime.json.bak'),
+      path.join(userData, 'body.json'),
+      path.join(userData, 'social-profile.json'),
+      path.join(userData, 'meme-dictionary.json'),
+      path.join(userData, 'daily-state.json'),
+      rpsStatePath,
+      balanceLedgerPath,
+      path.join(userData, 'game-daily.json'),
+      path.join(userData, 'game-assistant.json')
+    ]
+    for (const file of residualFiles) {
+      await fs.rm(file, { force: true }).catch(() => undefined)
+    }
+    await fs.rm(reflectionDir, { recursive: true, force: true }).catch(() => undefined)
+    await fs.rm(reportsDir, { recursive: true, force: true }).catch(() => undefined)
+
+    // 先让渲染侧收到返回，再重启进首次引导。
+    // 用 exit 而不是 quit：跳过 before-quit 的 flush，避免刚删掉的状态又被写回来。
+    setTimeout(() => {
+      app.relaunch()
+      app.exit(0)
+    }, 400)
+    return { ok: true }
+  })
+
   let autoBackupRunning = false
   async function maybeRunAutoBackup() {
     if (autoBackupRunning) return
@@ -2299,6 +4361,39 @@ function registerIpc() {
     log
   })
 
+  // ---- 内存自检：每分钟读一次 rss，800 MB 记日志，1.2 GB 落盘并清缓存 ----
+  const memoryGuard = createMemoryGuard({
+    log,
+    onRelease: async (snapshot) => {
+      // 先把内存里的待写数据落盘，再清缓存；顺序反了会丢最近的记忆。
+      await Promise.allSettled([
+        memoryStore.flush(),
+        chatHistoryStore.flush(),
+        companionService.flush(),
+        affinity.flush(),
+        factStore.flush(),
+        speechHabits.flush(),
+        socialProfileStore.flush(),
+        thoughtPool.flush(),
+        agendaRuntime.flush(),
+        memeDictionary.flush()
+      ])
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) await win.webContents.session.clearCache().catch(() => {})
+      }
+      log(`[memory] 已释放缓存（释放前 ${snapshot.rssMb} MB），建议重启应用`)
+    },
+    notify: (snapshot) => {
+      if (!Notification.isSupported()) return
+      new Notification({
+        title: '昔涟占用的内存有点多',
+        body: `当前 ${Math.round(snapshot.rssMb)} MB，已自动释放缓存。重启一次会更轻松。`
+      }).show()
+    }
+  })
+  memoryGuard.start()
+  app.on('before-quit', () => memoryGuard.stop())
+
   registerDiagnosticsChannels({
     registerChannel,
     getAppVersion: () => app.getVersion(),
@@ -2310,8 +4405,50 @@ function registerIpc() {
     modelStore,
     getQq: () => qq,
     getVault: () => vault,
-    getLegacyKeyMigrationWarning: () => legacyKeyMigrationWarning
+    getLegacyKeyMigrationWarning: () => legacyKeyMigrationWarning,
+    // 打包时由 scripts/after-pack.cjs 写入；开发态没有这个文件就明确返回 null。
+    getBuildInfo: () => {
+      try {
+        const raw = fsSync.readFileSync(path.join(app.getAppPath(), 'BUILD-INFO.json'), 'utf8')
+        const info = JSON.parse(raw)
+        return {
+          sha: typeof info.sha === 'string' ? info.sha : null,
+          builtAt: typeof info.builtAt === 'string' ? info.builtAt : null,
+          dirty: info.dirty === true
+        }
+      } catch {
+        return null
+      }
+    },
+    getMemoryGuard: () => memoryGuard.status()
   })
+
+  // ---- 语音唤醒：运行时按需下载；不随包发布，装不装由用户决定 ----
+  // 清单地址只从环境变量读，渲染侧无法把下载指向任意位置。
+  wakeVoice = registerWakeVoiceChannels({
+    registerChannel,
+    userData,
+    manifestUrl: (process.env.PET_WAKE_MANIFEST_URL ?? '').trim() || null,
+    fetchJson: async (url) => {
+      const response = await fetch(url, { redirect: 'error' })
+      if (!response.ok) throw new Error(`清单下载失败：HTTP ${response.status}`)
+      return response.json()
+    },
+    downloadBytes: async (url) => {
+      const response = await fetch(url, { redirect: 'error' })
+      if (!response.ok) throw new Error(`文件下载失败：HTTP ${response.status}`)
+      const length = Number(response.headers.get('content-length') ?? '0')
+      // 先看响应头，避免一次性拉一个超大文件进内存。
+      if (length > 600 * 1024 * 1024) throw new Error('文件超过体积上限')
+      return new Uint8Array(await response.arrayBuffer())
+    },
+    sha256: (bytes) => createHash('sha256').update(Buffer.from(bytes)).digest('hex'),
+    fs,
+    pathJoin: (...parts) => path.join(...parts),
+    log,
+    describeError: (error) => (error instanceof Error ? error.message : String(error))
+  })
+  void wakeVoice.init()
 }
 
 /**
@@ -2365,6 +4502,134 @@ function openSettingsWindow(panel) {
   })
 }
 
+/** 已入库表情的扩展名 → MIME；腾讯富媒体只按图片类型处理。 */
+const STICKER_MEDIA_TYPES = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp'
+}
+/** 腾讯单张图片上限 5MB。 */
+const QQ_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+
+/**
+ * 渲染层传 pet-media://pack/<packId>/<相对路径> 或 <packId>/<相对路径>。
+ * 两种写法都交给 packStore.resolvePackPath 再校验一次，渲染层拿不到真实磁盘路径。
+ */
+function resolveStickerFile(raw) {
+  const text = String(raw ?? '').trim()
+  if (text === '') return null
+
+  if (text.startsWith('pet-media://')) {
+    try {
+      const url = new URL(text)
+      if (url.host !== 'pack') return null
+      const relative = decodeURIComponent(url.pathname).replace(/^[/\\]+/, '')
+      const slash = relative.indexOf('/')
+      if (slash <= 0) return null
+      return packStore.resolvePackPath(relative.slice(0, slash), relative.slice(slash + 1))
+    } catch {
+      return null
+    }
+  }
+
+  const normalized = text.replace(/\\/g, '/')
+  const slash = normalized.indexOf('/')
+  if (slash <= 0) return null
+  return packStore.resolvePackPath(normalized.slice(0, slash), normalized.slice(slash + 1))
+}
+
+/**
+ * 把一张已入库的表情发到最近一次 QQ 会话。
+ * 只走被动回复窗口，不排队、不主动推送；窗口过期就明确回失败。
+ */
+async function sendQqSticker(file) {
+  if (qq === null || typeof qq.replyImage !== 'function') {
+    return { ok: false, reason: 'qq-offline', message: 'QQ 还没连上，先等网关就绪' }
+  }
+
+  // 先按表情库 id 找（builtin:… / pack:…），找不到再按素材包相对路径找。
+  // 两条路都不接受任意路径；任何一条抛错都当作「没有这个文件」，不把异常甩给渲染层。
+  const fromLibrary = await stickerLibrary.resolve(file).catch(() => null)
+  let resolved = fromLibrary === null ? null : fromLibrary.abs
+  if (resolved === null) {
+    try {
+      resolved = resolveStickerFile(file)
+    } catch {
+      resolved = null
+    }
+  }
+  if (resolved === null) {
+    return { ok: false, reason: 'bad-file', message: '表情文件路径不合法' }
+  }
+
+  const stat = await fs.stat(resolved).catch(() => null)
+  if (stat === null || !stat.isFile()) {
+    return { ok: false, reason: 'missing', message: '表情文件不存在，可能已被移走' }
+  }
+  if (stat.size > QQ_IMAGE_MAX_BYTES) {
+    return { ok: false, reason: 'too-large', message: '腾讯接口单张图片上限 5MB' }
+  }
+
+  const contentType = STICKER_MEDIA_TYPES[path.extname(resolved).toLowerCase()]
+  if (contentType === undefined) {
+    return { ok: false, reason: 'bad-type', message: '这个格式不能发到 QQ' }
+  }
+
+  const bytes = await fs.readFile(resolved)
+  const sent = await qq.replyImage(contentType, bytes)
+  if (!sent) {
+    return { ok: false, reason: 'window-closed', message: '不在被动回复窗口，稍后发条消息再试' }
+  }
+  return { ok: true }
+}
+
+/**
+ * 表情包预览页：网格浏览 + 待审核区，单例。
+ * 和设置窗同一套窗口参数；页面只调已登记通道。
+ */
+function openStickerWindow() {
+  if (stickerWin !== null && !stickerWin.isDestroyed()) {
+    stickerWin.show()
+    stickerWin.focus()
+    return
+  }
+
+  stickerWin = new BrowserWindow({
+    width: 760,
+    height: 760,
+    icon: appIconPath,
+    minWidth: 620,
+    minHeight: 560,
+    resizable: true,
+    frame: false,
+    backgroundColor: '#fffafc',
+    show: false,
+    skipTaskbar: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  })
+
+  stickerWin.once('ready-to-show', () => {
+    if (stickerWin !== null && !stickerWin.isDestroyed()) stickerWin.show()
+  })
+
+  stickerWin.on('closed', () => {
+    stickerWin = null
+  })
+
+  stickerWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+
+  void stickerWin.loadFile(path.join(__dirname, 'renderer', 'stickers.html'), {
+    query: { theme: settings.theme?.preset ?? 'SakuraPink' }
+  })
+}
+
 /**
  * 能力中心：九宫格入口，单例。
  *
@@ -2409,6 +4674,58 @@ function openAbilityWindow() {
 
   void abilityWin.loadFile(path.join(__dirname, 'renderer', 'ability.html'), {
     query: { theme: settings.theme?.preset ?? 'SakuraPink' }
+  })
+}
+
+/**
+ * 观察台：看她在想什么、跟谁熟、记得什么，单例。
+ *
+ * 页面只读快照，写动作都走已登记通道；窗口本身不持有额外权限。
+ */
+function openInsightWindow(tab) {
+  if (insightWin !== null && !insightWin.isDestroyed()) {
+    insightWin.show()
+    insightWin.focus()
+    if (typeof tab === 'string' && tab !== '') {
+      insightWin.webContents.send('pet:insight:select-tab', tab)
+    }
+    return
+  }
+
+  insightWin = new BrowserWindow({
+    width: 940,
+    height: 720,
+    icon: appIconPath,
+    minWidth: 760,
+    minHeight: 560,
+    resizable: true,
+    frame: false,
+    backgroundColor: '#fffafc',
+    show: false,
+    skipTaskbar: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  })
+
+  insightWin.once('ready-to-show', () => {
+    if (insightWin !== null && !insightWin.isDestroyed()) insightWin.show()
+  })
+
+  insightWin.on('closed', () => {
+    insightWin = null
+  })
+
+  insightWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+
+  void insightWin.loadFile(path.join(__dirname, 'renderer', 'insight.html'), {
+    query:
+      typeof tab === 'string' && tab !== ''
+        ? { theme: settings.theme?.preset ?? 'SakuraPink', tab }
+        : { theme: settings.theme?.preset ?? 'SakuraPink' }
   })
 }
 
@@ -2699,7 +5016,7 @@ function applyIconSettings(force = false) {
 
   const icon = resolveAppIcon()
   if (icon === null) return
-  for (const target of [win, settingsWin, chatWin, abilityWin, onboardingWin]) {
+  for (const target of [win, settingsWin, chatWin, abilityWin, insightWin, onboardingWin]) {
     if (target === null || target === undefined || target.isDestroyed()) continue
     try {
       target.setIcon(icon)
@@ -3109,22 +5426,73 @@ async function createWindow() {
   })
 }
 
+let screenConsentAskedThisRun = false
+
+/**
+ * 识屏首次授权。
+ *
+ * 只在第一次问一次：允许就打开，拒绝就永久关着（设置页仍可手动再开）。
+ * 文案必须写清楚会读屏幕内容摘要，不能只说「为了更好的体验」。
+ */
+async function maybeAskScreenConsent() {
+  if (screenConsentAskedThisRun) return
+  if (settings?.presence?.screen?.consentAsked === true) return
+  // 引导还没走完时先不叠第二个弹窗，等下次启动再问。
+  if (settings?.onboarded !== true) return
+  screenConsentAskedThisRun = true
+
+  const options = {
+    type: 'question',
+    buttons: ['先不用', '允许读屏'],
+    defaultId: 0,
+    cancelId: 0,
+    title: '要不要让我看见屏幕上的字？',
+    message: '我可以读一读你屏幕上的文字，说话时偶尔接上一句。',
+    detail:
+      '会读取当前屏幕内容的文字摘要（大约每十分钟一次）。只看字，不保存截图，也不上传。\n' +
+      '这个开关随时能在设置里改。'
+  }
+
+  try {
+    const result =
+      win === null || win.isDestroyed()
+        ? await dialog.showMessageBox(options)
+        : await dialog.showMessageBox(win, options)
+    const allowed = result.response === 1
+    settings = mergeLayer(settings, {
+      presence: { screen: { enabled: allowed, consentAsked: true } }
+    })
+    await writeSettings(settings)
+    log('[screen] 识屏授权：', allowed ? '允许' : '不允许')
+  } catch (error) {
+    log('[screen] 询问识屏授权失败：', error?.message ?? error)
+  }
+}
+
 app.whenReady().then(async () => {
   // 第二个实例只负责把第一只叫出来，自己不装配任何东西。
   if (!singleInstanceLock) return
 
-  // 权限一律默认拒绝：桌宠不需要摄像头、麦克风、通知。
-  // 只留剪贴板写入（诊断面板「复制报告」要用），其余请求落日志便于排查。
+  // 权限默认拒绝：只在语音唤醒开着的时候放行麦克风，关掉立刻回到拒绝。
+  // 剪贴板写入留给诊断面板「复制报告」。
   const allowedPermissions = new Set(['clipboard-sanitized-write'])
+  const isPermissionAllowed = (permission) => {
+    if (allowedPermissions.has(permission)) return true
+    // 只放 media（含麦克风）；摄像头、通知等仍一律拒绝。
+    return permission === 'media' && wakeVoice?.isEnabled() === true
+  }
   session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
-    const allowed = allowedPermissions.has(permission)
+    const allowed = isPermissionAllowed(permission)
     if (!allowed) log('[permission] 已拒绝：', permission)
     callback(allowed)
   })
   session.defaultSession.setPermissionCheckHandler((_wc, permission) =>
-    allowedPermissions.has(permission)
+    isPermissionAllowed(permission)
   )
-  session.defaultSession.setDevicePermissionHandler(() => false)
+  session.defaultSession.setDevicePermissionHandler((details) => {
+    // 只有唤醒开着时才允许音频输入设备；其余设备类型保持拒绝。
+    return wakeVoice?.isEnabled() === true && details.deviceType === 'audioinput'
+  })
 
   // 锁屏、休眠期间不主动搭话；唤醒后把计时起点推到现在，避免攒着一条立刻补发。
   powerMonitor.on('suspend', () => {
@@ -3197,12 +5565,16 @@ app.whenReady().then(async () => {
   registerIpc()
   syncBalanceMonitor()
   await createWindow()
+  // 识屏单独问一次；不挡启动，窗口起来之后再问。
+  void maybeAskScreenConsent()
   createTray()
   // 指标采样只为状态条服务：关着就不启动，省掉每 6 秒一次 PowerShell。
   syncHudSampler()
   startDailyReviewTimer()
   // 主动开口的定时器一直挂着，开关在 setInterval 里判断，改设置即时生效。
   startPresenceTimer()
+  // 收场单独一条时间线：它要跑在桌宠隐藏、专注模式中也照常检查。
+  startClosingTimer()
   if (settings.onboarded !== true) openOnboardingWindow()
   log('ready')
 }).catch((error) => {
@@ -3243,7 +5615,18 @@ app.on('before-quit', (event) => {
   memoryFlushed = true
   event.preventDefault()
   // 落盘最多等 3 秒：加密仓库卡住时也得让用户关得掉，不能只留任务管理器。
-  const flushed = Promise.allSettled([memoryStore.flush(), chatHistoryStore.flush()])
+  const flushed = Promise.allSettled([
+    memoryStore.flush(),
+    chatHistoryStore.flush(),
+    companionService.flush(),
+    affinity.flush(),
+    factStore.flush(),
+    speechHabits.flush(),
+    socialProfileStore.flush(),
+    thoughtPool.flush(),
+    agendaRuntime.flush(),
+    memeDictionary.flush()
+  ])
   const timeout = new Promise((resolve) => setTimeout(resolve, 3000))
   Promise.race([flushed, timeout]).finally(() => app.quit())
 })

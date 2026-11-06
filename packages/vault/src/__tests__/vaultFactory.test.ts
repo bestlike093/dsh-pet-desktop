@@ -86,7 +86,8 @@ describe('装配工厂护栏（S1 第 6 步收尾）', () => {
     expect((await vault.diagnose()).acknowledged).toBe(false)
     const afterAck = await vault.acknowledgeInsecure()
     expect(afterAck.acknowledged).toBe(true)
-  })
+    // 全量并发跑时，文件密钥环的首次写入会排队到 5 秒之外；单跑通常 1 秒内完成。
+  }, 15_000)
 
   it('② 后端变更后 acknowledged 重置，且切回旧后端也不恢复', async () => {
     const dir = await tempDir()

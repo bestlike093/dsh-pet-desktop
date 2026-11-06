@@ -20,6 +20,7 @@ function config(overrides: Partial<GameDailyConfig> = {}): GameDailyConfig {
     mode: 'real',
     catchUp: false,
     reportSession: true,
+    launchGame: false,
     ...overrides
   }
 }

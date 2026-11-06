@@ -74,8 +74,38 @@ function appendMessage(role, content, at) {
   return row
 }
 
-/** 发送中的省略号气泡；返回移除函数。 */
-function appendTyping() {
+/**
+ * 照片气泡：地址由主进程给，这里不拼路径、不读本地文件。
+ * 图裂了就把这一行收掉，别在对话里留一个空的框。
+ */
+function appendPhoto(url) {
+  const empty = $('c-empty')
+  if (empty !== null) empty.remove()
+
+  const row = document.createElement('div')
+  row.className = 'c-row assistant'
+
+  const bubble = document.createElement('div')
+  bubble.className = 'c-bubble c-photo'
+
+  const img = document.createElement('img')
+  img.alt = ''
+  img.loading = 'lazy'
+  img.addEventListener('error', () => row.remove())
+  img.src = url
+
+  const meta = document.createElement('div')
+  meta.className = 'c-meta'
+  meta.textContent = '刚拍下'
+
+  bubble.append(img)
+  row.append(bubble, meta)
+  $('c-log').append(row)
+  scrollToBottom()
+  return row
+}
+
+/** 发送中的省略号气泡；返回移除函数。 */function appendTyping() {
   const row = document.createElement('div')
   row.className = 'c-row assistant'
 
@@ -157,6 +187,13 @@ async function send() {
 
     if (result?.ok === true) {
       appendMessage('assistant', String(result.reply ?? ''), result.at)
+      // 她真拍下一张时，紧跟一句话把照片放出来；没有地址就不占位。
+      const photoUrl = typeof result.photo?.url === 'string' ? result.photo.url : ''
+      if (photoUrl !== '') {
+        appendPhoto(photoUrl)
+      } else if (typeof result.photoFailed === 'string') {
+        showNotice(`这次没拍成：${reasonText(result.photoFailed)}`)
+      }
       lastFailedText = null
       return
     }

@@ -9,6 +9,7 @@ import type {
   PresenceSettings,
   QqChannelConfig,
   QuietHoursSettings,
+  ScreenReadSettings,
   SettingsV2,
   StickerSettings,
   UiMode,
@@ -48,7 +49,8 @@ const KNOWN_V1_KEYS = new Set<string>([
   'poseEvery',
   'soundLevel',
   // v1 里出现 balance 时也由 v2 接管，不落 legacy。
-  'balance'
+  'balance',
+  'wakeWords'
 ])
 
 const HUD_DETAIL = new Set(['full', 'simple', 'simple2'])
@@ -58,11 +60,6 @@ const VOICE_TRIGGERS = new Set<VoiceTrigger>(['every', 'proactive', 'manual'])
 const VOICE_PROVIDERS = new Set<VoiceProvider>(['local', 'cloud'])
 const VOICE_LOCAL_PROTOCOLS = new Set<VoiceLocalProtocol>(['generic', 'gpt-sovits'])
 const LOCALES = new Set<Locale>(['zh-CN', 'en-US'])
-const EXPRESSION_GROUPS = new Set<'off' | 'experiment' | 'control'>([
-  'off',
-  'experiment',
-  'control'
-])
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -74,6 +71,26 @@ function pickText(value: unknown, fallback: string): string {
   if (typeof value !== 'string') return fallback
   const text = value.trim()
   return text.length === 0 ? fallback : text
+}
+
+/** 可编辑人格分段；键名与 electron/persona.mjs 的 SECTION_ORDER 保持一致。 */
+const PERSONA_SECTION_KEYS = ['identity', 'worldview', 'lifeview', 'values', 'manner', 'style']
+
+/**
+ * 六段人格覆盖：只认已知段，纯空白当作「跟随默认」直接丢掉，
+ * 超长截断到 1200 字，避免 settings.json 被一段话撑爆。
+ */
+function pickPersonaSections(value: unknown): Record<string, string> {
+  if (!isRecord(value)) return {}
+  const out: Record<string, string> = {}
+  for (const key of PERSONA_SECTION_KEYS) {
+    const text = value[key]
+    if (typeof text !== 'string') continue
+    const trimmed = text.trim()
+    if (trimmed.length === 0) continue
+    out[key] = trimmed.slice(0, 1_200)
+  }
+  return out
 }
 
 function clampNumber(value: unknown, fallback: number, min: number, max: number): number {
@@ -122,6 +139,23 @@ function pickOwnerOpenIds(value: unknown): readonly string[] {
   return ids
 }
 
+/**
+ * 唤醒词：去空白、去重，最多 8 个、每个最多 16 字。
+ * 空数组合法 —— 表示「跟随内置默认」，这里不替使用者填默认词。
+ */
+function pickWakeWords(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const words: string[] = []
+  for (const item of value) {
+    if (typeof item !== 'string') continue
+    const word = item.trim().slice(0, 16)
+    if (word.length === 0 || words.includes(word)) continue
+    words.push(word)
+    if (words.length >= 8) break
+  }
+  return words
+}
+
 function parseQqChannel(raw: unknown, base: QqChannelConfig): QqChannelConfig {
   const value = isRecord(raw) ? raw : {}
   const transport =
@@ -139,7 +173,8 @@ function parseQqChannel(raw: unknown, base: QqChannelConfig): QqChannelConfig {
       typeof value['targetOpenId'] === 'string' ? value['targetOpenId'].trim().slice(0, 128) : base.targetOpenId,
     publicKey:
       typeof value['publicKey'] === 'string' ? value['publicKey'].trim().slice(0, 256) : base.publicKey,
-    webhookPort: pickInt(value['webhookPort'], base.webhookPort, 1, 65_535)
+    webhookPort: pickInt(value['webhookPort'], base.webhookPort, 1, 65_535),
+    imitateFormat: pickBoolean(value['imitateFormat'], base.imitateFormat)
   }
 }
 
@@ -214,7 +249,11 @@ function parseIcon(raw: unknown, base: IconSettings): IconSettings {
 
 function parseSticker(raw: unknown, base: StickerSettings): StickerSettings {
   const value = isRecord(raw) ? raw : {}
-  return { source: pickPackRef(value['source']) }
+  return {
+    source: pickPackRef(value['source']),
+    autoApprove:
+      typeof value['autoApprove'] === 'boolean' ? value['autoApprove'] : base.autoApprove
+  }
 }
 
 /** 整数项：先夹取范围再取整，避免 3.7 这种值混进条数配置。 */
@@ -232,21 +271,38 @@ function parseCompanion(raw: unknown, base: CompanionSettings): CompanionSetting
   const memory = isRecord(root['memory']) ? root['memory'] : {}
   const chat = isRecord(root['chat']) ? root['chat'] : {}
   const persona = isRecord(root['persona']) ? root['persona'] : {}
-  const emotion = isRecord(root['emotion']) ? root['emotion'] : {}
-  const afterglow = isRecord(emotion['afterglow']) ? emotion['afterglow'] : {}
-  const expression = isRecord(emotion['expression']) ? emotion['expression'] : {}
-  const needs = isRecord(emotion['needs']) ? emotion['needs'] : {}
   const care = isRecord(root['care']) ? root['care'] : {}
   const dailyReview = isRecord(care['dailyReview']) ? care['dailyReview'] : {}
-  const caseReview = isRecord(care['caseReview']) ? care['caseReview'] : {}
-  const questionnaire = isRecord(care['questionnaire']) ? care['questionnaire'] : {}
-  const maslow = isRecord(care['maslow']) ? care['maslow'] : {}
+  const embedding = isRecord(memory['embedding']) ? memory['embedding'] : {}
+  const body = isRecord(root['body']) ? root['body'] : {}
+  const sleepWindow = isRecord(body['sleepWindow']) ? body['sleepWindow'] : {}
+  const cycle = isRecord(body['cycle']) ? body['cycle'] : {}
+  const intimacy = isRecord(root['intimacy']) ? root['intimacy'] : {}
+  const embeddingProvider = embedding['provider']
 
   return {
     memory: {
       enabled: pickBoolean(memory['enabled'], base.memory.enabled),
       maxItems: pickInt(memory['maxItems'], base.memory.maxItems, 50, 10_000),
-      summarizeEvery: pickInt(memory['summarizeEvery'], base.memory.summarizeEvery, 1, 100)
+      summarizeEvery: pickInt(memory['summarizeEvery'], base.memory.summarizeEvery, 1, 100),
+      // 未知协议退回 auto，不把可疑值带进运行时。
+      embedding: {
+        provider:
+          embeddingProvider === 'auto' ||
+          embeddingProvider === 'openai' ||
+          embeddingProvider === 'ollama' ||
+          embeddingProvider === 'off'
+            ? embeddingProvider
+            : base.memory.embedding.provider,
+        baseUrl: pickText(embedding['baseUrl'], '').slice(0, 300),
+        model: pickText(embedding['model'], '').slice(0, 120),
+        timeoutMs: pickInt(
+          embedding['timeoutMs'],
+          base.memory.embedding.timeoutMs,
+          500,
+          30_000
+        )
+      }
     },
     chat: {
       enabled: pickBoolean(chat['enabled'], base.chat.enabled),
@@ -261,44 +317,42 @@ function parseCompanion(raw: unknown, base: CompanionSettings): CompanionSetting
       enabled: pickBoolean(persona['enabled'], base.persona.enabled),
       // 追加说明允许为空：空着表示只用基础人格。
       extraPrompt:
-        typeof persona['extraPrompt'] === 'string' ? persona['extraPrompt'].slice(0, 2_000) : ''
-    },
-    emotion: {
-      afterglow: {
-        enabled: pickBoolean(afterglow['enabled'], base.emotion.afterglow.enabled),
-        // 半衰期太短会像闪一下，太长又像永不消退；5..720 分钟之间夹取。
-        halfLifeMinutes: pickInt(
-          afterglow['halfLifeMinutes'],
-          base.emotion.afterglow.halfLifeMinutes,
-          5,
-          720
-        )
-      },
-      expression: {
-        group: pick<'off' | 'experiment' | 'control'>(
-          expression['group'],
-          EXPRESSION_GROUPS,
-          base.emotion.expression.group
-        )
-      },
-      needs: { enabled: pickBoolean(needs['enabled'], base.emotion.needs.enabled) }
+        typeof persona['extraPrompt'] === 'string' ? persona['extraPrompt'].slice(0, 2_000) : '',
+      // 六段覆盖同样允许全空：空串表示这一段跟随默认。
+      sections: pickPersonaSections(persona['sections'])
     },
     care: {
       dailyReview: {
         enabled: pickBoolean(dailyReview['enabled'], base.care.dailyReview.enabled),
         at: pickTime(dailyReview['at'], base.care.dailyReview.at)
+      }
+    },
+    body: {
+      enabled: pickBoolean(body['enabled'], base.body.enabled),
+      sleepWindow: {
+        start: pickTime(sleepWindow['start'], base.body.sleepWindow.start),
+        end: pickTime(sleepWindow['end'], base.body.sleepWindow.end)
       },
-      caseReview: {
-        enabled: pickBoolean(caseReview['enabled'], base.care.caseReview.enabled),
-        at: pickTime(caseReview['at'], base.care.caseReview.at)
-      },
-      questionnaire: { enabled: pickBoolean(questionnaire['enabled'], false) },
-      maslow: { enabled: pickBoolean(maslow['enabled'], false) },
-      dailyTokenBudget: pickInt(
-        care['dailyTokenBudget'],
-        base.care.dailyTokenBudget,
-        0,
-        1_000_000
+      cycle: {
+        enabled: pickBoolean(cycle['enabled'], base.body.cycle.enabled),
+        // 只认 YYYY-MM-DD；空串表示还没记录，不猜日期。
+        lastStart:
+          typeof cycle['lastStart'] === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(cycle['lastStart'])
+            ? cycle['lastStart']
+            : base.body.cycle.lastStart
+      }
+    },
+    intimacy: {
+      // 默认关：旧配置里没有这一项，读不到就保持关闭。
+      enabled: pickBoolean(intimacy['enabled'], base.intimacy.enabled),
+      perDay: pickInt(intimacy['perDay'], base.intimacy.perDay, 1, 8),
+      cooldownHours: pickInt(intimacy['cooldownHours'], base.intimacy.cooldownHours, 1, 48),
+      idleHours: pickInt(intimacy['idleHours'], base.intimacy.idleHours, 1, 24),
+      aftercareMinutes: pickInt(
+        intimacy['aftercareMinutes'],
+        base.intimacy.aftercareMinutes,
+        5,
+        240
       )
     }
   }
@@ -395,6 +449,7 @@ function acceptV2(raw: Record<string, unknown>): SettingsMigration {
       minIntervalSeconds: pickInt(voice['minIntervalSeconds'], base.voice.minIntervalSeconds, 0, 600)
     },
     locale: pick<Locale>(raw['locale'], LOCALES, base.locale),
+    wakeWords: pickWakeWords(raw['wakeWords']),
     companion: parseCompanion(raw['companion'], base.companion),
     presence: parsePresence(raw['presence'], base.presence),
     balance: parseBalance(balance, base.balance),
@@ -459,7 +514,17 @@ function parsePresence(raw: unknown, base: PresenceSettings): PresenceSettings {
     intervalMinutes: pickInt(value['intervalMinutes'], base.intervalMinutes, 1, 120),
     city: pickText(value['city'], base.city).slice(0, 20),
     useWeather: pickBoolean(value['useWeather'], base.useWeather),
-    quiet: parseQuiet(value['quiet'], base.quiet)
+    quiet: parseQuiet(value['quiet'], base.quiet),
+    // 识屏只认两个布尔：没写过的老设置一律当「没开、没问过」。
+    screen: parseScreenRead(value['screen'], base.screen)
+  }
+}
+
+function parseScreenRead(raw: unknown, base: ScreenReadSettings): ScreenReadSettings {
+  const value = isRecord(raw) ? raw : {}
+  return {
+    enabled: pickBoolean(value['enabled'], base.enabled),
+    consentAsked: pickBoolean(value['consentAsked'], base.consentAsked)
   }
 }
 
@@ -512,6 +577,7 @@ function fromV1(raw: Record<string, unknown>): SettingsMigration {
     soundLevel: clampNumber(raw['soundLevel'], base.soundLevel, 0, 1),
     voice: base.voice,
     locale: base.locale,
+    wakeWords: pickWakeWords(raw['wakeWords']),
     companion: base.companion,
     showHud: pickBoolean(raw['showHud'], base.showHud),
     hudName: pickHudName(raw['hudName'], base.hudName),

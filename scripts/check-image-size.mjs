@@ -15,6 +15,16 @@ const LIMIT = 512 * 1024
 const strict = process.argv.includes('--strict')
 
 const IMAGE = /\.(png|jpe?g|webp|gif|avif|bmp)$/i
+
+// 例外清单：动图逐帧压，512KB 这个给静态图定的阈值并不适用。
+// 每条都要写清楚为什么放宽；没有理由的「暂时超一点」不允许登记。
+const ALLOW = new Map([
+  [
+    'assets/sticker-packs/cyrene-agent/clingy-confused.gif',
+    '33 帧 500x500 动图；压到 512KB 以下必须掉帧或糊化，保留完整动作'
+  ]
+])
+
 const images = []
 
 function walk(dir) {
@@ -45,7 +55,8 @@ function walk(dir) {
 walk(ASSETS)
 images.sort((a, b) => b.size - a.size)
 
-const oversize = images.filter((item) => item.size > LIMIT)
+const oversize = images.filter((item) => item.size > LIMIT && !ALLOW.has(item.rel))
+const excused = images.filter((item) => item.size > LIMIT && ALLOW.has(item.rel))
 const totalBytes = images.reduce((sum, item) => sum + item.size, 0)
 
 const kb = (bytes) => `${(bytes / 1024).toFixed(1)}KB`
@@ -57,6 +68,11 @@ console.log(`超过阈值 ${oversize.length} 张`)
 if (oversize.length > 0) {
   console.log('超限清单：')
   for (const item of oversize) console.log(`  - ${item.rel} ${kb(item.size)}`)
+}
+
+if (excused.length > 0) {
+  console.log('登记豁免：')
+  for (const item of excused) console.log(`  - ${item.rel} ${kb(item.size)}（${ALLOW.get(item.rel)}）`)
 }
 
 console.log('\n最大的 10 张：')

@@ -135,7 +135,9 @@ describe('同步加密（口令）', () => {
     expect(JSON.stringify(packet)).not.toContain(PROMPT)
     const companion = recordValue(packet, 'companion')
     expect(companion.persona.extraPrompt).toBeUndefined()
-    expect(companion.__encryptedExtraPrompt.__encSync).toBe(1)
+    // v3 起信封绑定字段身份，旧 v1/v2 包仍可解，但新写出的都是 v3。
+    expect(companion.__encryptedExtraPrompt.__encSync).toBe(3)
+    expect(companion.__encryptedExtraPrompt.ctx).toBe('companion.persona.extraPrompt')
     // 同块的非敏感字段照常同步。
     expect(companion.name).toBe('Cyrene')
 

@@ -30,6 +30,41 @@
 
 const fs = require('node:fs')
 const path = require('node:path')
+const { execFileSync } = require('node:child_process')
+
+/**
+ * 写入包内 BUILD-INFO.json：设置页「运行状态」用它显示构建来源。
+ * 只记录版本、提交、是否带未提交改动、构建时间，不写用户名或本机路径。
+ */
+function writeBuildInfo(projectDir, appRoot) {
+  const readGit = (args) => {
+    try {
+      return execFileSync('git', args, { cwd: projectDir, encoding: 'utf8' }).trim()
+    } catch {
+      return ''
+    }
+  }
+
+  let version = ''
+  try {
+    version = JSON.parse(fs.readFileSync(path.join(projectDir, 'package.json'), 'utf8')).version ?? ''
+  } catch {
+    version = ''
+  }
+
+  const sha = readGit(['rev-parse', 'HEAD'])
+  const status = readGit(['status', '--porcelain'])
+  const info = {
+    version,
+    sha: sha || null,
+    dirty: status !== '',
+    builtAt: new Date().toISOString()
+  }
+
+  fs.mkdirSync(appRoot, { recursive: true })
+  fs.writeFileSync(path.join(appRoot, 'BUILD-INFO.json'), `${JSON.stringify(info, null, 2)}\n`, 'utf8')
+  console.log(`[afterPack] BUILD-INFO：${info.version || '?'} @ ${info.sha ? info.sha.slice(0, 7) : 'no-git'}${info.dirty ? '+' : ''}`)
+}
 
 function copyPetPackages(projectDir, targetRoot, names) {
   const copied = []
@@ -68,6 +103,9 @@ function copyPetPackages(projectDir, targetRoot, names) {
 module.exports = async function afterPack(context) {
   const appOutDir = context.appOutDir
   const projectDir = context.packager.projectDir
+  const appRoot = path.join(appOutDir, 'resources', 'app')
+
+  writeBuildInfo(projectDir, appRoot)
 
   const linkDir = path.join(projectDir, 'apps', 'desktop', 'node_modules', '@pet')
   if (!fs.existsSync(linkDir)) {
@@ -78,8 +116,6 @@ module.exports = async function afterPack(context) {
   const names = fs.readdirSync(linkDir, { withFileTypes: true })
     .filter((e) => e.isDirectory() || e.isSymbolicLink())
     .map((e) => e.name)
-
-  const appRoot = path.join(appOutDir, 'resources', 'app')
 
   // 1) 给 apps/desktop/dist 用
   const desktopRoot = path.join(appRoot, 'apps', 'desktop', 'node_modules', '@pet')

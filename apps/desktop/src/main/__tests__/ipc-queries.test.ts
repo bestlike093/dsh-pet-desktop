@@ -26,6 +26,8 @@ const deps: QueryChannelDeps = {
   getLastRenderInfo: () => null,
   modelStore: { list: async () => [], root: '', toMediaUrl: () => '' },
   packStore: { list: async () => [] },
+  stickerInbox: { list: async () => [] },
+  stickerLibrary: { list: async () => [] },
   assetLibrary: { list: async () => ({ ok: true, groups: [], total: 0 }) },
   systemStats: { snapshot: () => ({}) },
   presenceService: { currentMood: () => ({}) },
@@ -102,6 +104,8 @@ describe('registerQueryChannels', () => {
         'pet:render:info',
         'pet:secrets:masked',
         'pet:settings:get',
+        'pet:sticker:inbox',
+        'pet:sticker:library',
         'pet:sync:passphraseStatus',
         'pet:system:stats',
         'pet:voice:status'

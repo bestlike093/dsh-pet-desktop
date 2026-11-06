@@ -2,6 +2,8 @@ node_modules/
 dist/
 # 所有 dist-* 构建/打包输出（dist-verify、dist-nsis-verify、dist-pkg…）都不入库
 dist-*/
+# 临时修复备份只留在本机
+.fix-backup-*/
 *.log
 *.tsbuildinfo
 .DS_Store

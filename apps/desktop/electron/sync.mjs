@@ -51,6 +51,9 @@ const ENCRYPTED_SYNC_PATHS = Object.freeze([Object.freeze(['companion', 'persona
 /** 同步包里的密文字段名。前缀双下划线，避免和真实设置项撞名。 */
 export const ENCRYPTED_SYNC_FIELD = '__encryptedExtraPrompt'
 
+/** 密文绑定的字段身份；同一口令下把密文搬到别的字段会解不开。 */
+const ENCRYPTED_SYNC_CONTEXT = 'companion.persona.extraPrompt'
+
 function cloneForSync(value) {
   if (value === null || typeof value !== 'object') return value
   return JSON.parse(JSON.stringify(value))
@@ -99,7 +102,11 @@ async function packageForPublish(key, rawValue, passphrase) {
     const plain = readPath(rawValue, path.slice(1))
     if (typeof plain !== 'string' || plain.length === 0) continue
     try {
-      copy[ENCRYPTED_SYNC_FIELD] = await encryptForSync(plain, passphrase)
+      copy[ENCRYPTED_SYNC_FIELD] = await encryptForSync(
+        plain,
+        passphrase,
+        ENCRYPTED_SYNC_CONTEXT
+      )
     } catch (error) {
       // 加密失败不阻断整包：宁可这次不带，也不退回明文。
       return copy
@@ -131,7 +138,7 @@ async function resolveIncoming(key, rawValue, passphrase) {
   if (!passphrase) return { value: copy, note: 'sync-passphrase-missing' }
 
   try {
-    const plain = await decryptFromSync(envelope, passphrase)
+    const plain = await decryptFromSync(envelope, passphrase, ENCRYPTED_SYNC_CONTEXT)
     const target = key === 'companion' ? 'companion' : null
     if (target === null) return { value: copy, note: 'sync-encrypted-field-unknown' }
     if (!copy.persona || typeof copy.persona !== 'object') copy.persona = {}

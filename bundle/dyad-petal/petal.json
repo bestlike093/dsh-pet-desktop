@@ -1,0 +1,9 @@
+{
+  "id": "dyad.pet",
+  "name": "Dyad Pet Probe",
+  "version": "0.1.0",
+  "entry": "index.mjs",
+  "permissions": [],
+  "hostCapabilities": [],
+  "minHostVersion": "2.0.0"
+}

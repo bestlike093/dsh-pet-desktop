@@ -8,42 +8,19 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
+import { DEFAULT_EMOJI_CATALOG } from '@pet/core/browser'
+
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp'])
 
 /** 素材目录的展示名；不认识的目录直接用目录名，不瞎猜。 */
 const GROUP_NAMES = {
-  'whale-girl-emoji': '表情 · 硬边',
-  'whale-girl-emoji-soft': '表情 · 柔边',
-  'whale-girl-stand': '立绘',
   cyrene: 'Cyrene · 默认素材'
-}
-
-/** 表情文件名 → 中文名。取自 assets/whale-girl-emoji/README.md 的清单。 */
-const EXPRESSION_NAMES = {
-  '01-happy': '开心',
-  '02-laugh': '大笑',
-  '03-cry': '大哭',
-  '04-angry': '生气',
-  '05-sleepy': '困了',
-  '06-confused': '疑惑',
-  '07-shy': '害羞',
-  '08-surprised': '惊讶',
-  '09-speechless': '无语',
-  '10-love': '比心'
 }
 
 /** 拼 pet-media://asset/...；逐段编码，目录名有中文也不会坏。 */
 export function assetUrl(relative) {
   const segments = relative.split(/[\\/]+/).filter((part) => part !== '')
   return `pet-media://asset/${segments.map(encodeURIComponent).join('/')}`
-}
-
-/** 文件名 → 展示名；没有映射就退回文件名，不硬编一个看起来合理的名字。 */
-function describeAsset(stem) {
-  if (EXPRESSION_NAMES[stem] !== undefined) return EXPRESSION_NAMES[stem]
-  const stand = /^stand-(\d+)/.exec(stem)
-  if (stand !== null) return `立绘 ${stand[1]}`
-  return stem
 }
 
 /** 列一层目录里的图片；subdir 只用于拼相对路径。 */
@@ -63,7 +40,7 @@ async function listImages(dir, groupId, subdir = '') {
 
     items.push({
       id: subdir === '' ? `${groupId}/${stem}` : `${groupId}/${subdir}/${stem}`,
-      name: describeAsset(stem),
+      name: stem,
       file: subdir === '' ? entry.name : `${subdir}/${entry.name}`,
       url: assetUrl(relative)
     })
@@ -71,17 +48,6 @@ async function listImages(dir, groupId, subdir = '') {
 
   items.sort((a, b) => a.file.localeCompare(b.file))
   return items
-}
-
-/**
- * 立绘优先用 converted/ 下的 600×800 版本，没有才退回目录里的原图。
- * 两条路径都给不出可用项就返回空，不拿 broken-404 顶数。
- */
-async function listStands(dir, groupId) {
-  const converted = await listImages(path.join(dir, 'converted'), groupId, 'converted')
-  const usable = converted.filter((item) => /stand-\d+/.test(item.file))
-  if (usable.length > 0) return usable
-  return await listImages(dir, groupId)
 }
 
 /**
@@ -119,7 +85,12 @@ function resolveCyreneUrls(manifest) {
     emotions: mapValues(manifest.emotions),
     sounds: mapValues(manifest.sounds),
     stickers: mapValues(manifest.stickers),
-    avatar: prefix(manifest.avatar)
+    avatar: prefix(manifest.avatar),
+    // 陪伴层给表情 id（如 hugtight），渲染层要能换成实际图片地址。
+    // 清单以 core 的 DEFAULT_EMOJI_CATALOG 为准，和选图器保持同一份来源。
+    emojiFiles: Object.fromEntries(
+      DEFAULT_EMOJI_CATALOG.map((entry) => [entry.id, assetUrl(path.join('cyrene', 'emoji', entry.file))])
+    )
   }
 }
 
@@ -157,9 +128,7 @@ export function createAssetLibrary({ root }) {
 
       const dir = path.join(root, entry.name)
       let items
-      if (entry.name === 'whale-girl-stand') {
-        items = await listStands(dir, entry.name)
-      } else if (entry.name === 'cyrene') {
+      if (entry.name === 'cyrene') {
         items = await listCyrene(dir, entry.name)
       } else {
         items = await listImages(dir, entry.name)

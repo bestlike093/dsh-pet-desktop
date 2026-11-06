@@ -45,7 +45,7 @@ describe('图标与贴纸来源', () => {
   it('默认全部为空，代表用内置素材、贴纸关闭', () => {
     const value = parse({})
     expect(value.icon).toEqual({ tray: '', app: '' })
-    expect(value.sticker).toEqual({ source: '' })
+    expect(value.sticker).toEqual({ source: '', autoApprove: true })
   })
 
   it('合法的包引用会被保留', () => {
@@ -66,6 +66,11 @@ describe('图标与贴纸来源', () => {
     expect(value.icon.tray).toBe('')
     expect(value.icon.app).toBe('')
     expect(value.sticker.source).toBe('')
+  })
+
+  it('关掉自动入库后保留 false，不会被默认值覆盖', () => {
+    const value = parse({ sticker: { autoApprove: false } })
+    expect(value.sticker.autoApprove).toBe(false)
   })
 })
 
@@ -105,10 +110,10 @@ describe('气泡字体与底图', () => {
 
 describe('迁移与契约', () => {
   it('v1 配置补全新字段而不是留空对象', () => {
-    const result = migrateSettings({ schemaVersion: 1, nickname: '柒柒' })
+    const result = migrateSettings({ schemaVersion: 1, nickname: '小满' })
     if (!result.ok) throw result.error
     expect(result.value.icon).toEqual({ tray: '', app: '' })
-    expect(result.value.sticker).toEqual({ source: '' })
+    expect(result.value.sticker).toEqual({ source: '', autoApprove: true })
     expect(result.value.bubble.background).toBe('')
   })
 
@@ -116,7 +121,7 @@ describe('迁移与契约', () => {
     const value = {
       ...DEFAULT_SETTINGS,
       icon: { tray: 'pack:cyrene:tray.ico', app: '' },
-      sticker: { source: 'pack:cyrene:a.png' }
+      sticker: { ...DEFAULT_SETTINGS.sticker, source: 'pack:cyrene:a.png' }
     }
     const v21 = settingsV2ToV21(value)
     expect(v21._legacy).toBeUndefined()

@@ -49,6 +49,10 @@ export interface GameDailyConfig {
   readonly reportSession: boolean
   /** 原神可指定 BetterGI.exe；其余游戏由执行引擎自己找。 */
   readonly gamePath?: string
+  /** 真实执行前先拉起游戏本体。默认关闭，演练永远不启动。 */
+  readonly launchGame: boolean
+  /** 游戏本体路径；留空则按盘符候选自动探测。 */
+  readonly installPath?: string
 }
 
 export interface ConfigIssue {
@@ -57,6 +61,11 @@ export interface ConfigIssue {
 }
 
 const TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/
+
+/** 时间是否是合法的 `HH:MM`。读盘修复与保存校验共用这一条规则。 */
+export function isValidTime(value: string): boolean {
+  return TIME_PATTERN.test(value)
+}
 
 export function isGameId(value: string): value is GameId {
   return (GAME_IDS as readonly string[]).includes(value)

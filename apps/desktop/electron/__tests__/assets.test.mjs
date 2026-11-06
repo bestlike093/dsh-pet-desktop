@@ -26,8 +26,8 @@ afterEach(async () => {
 
 describe('assetUrl', () => {
   it('拼出 pet-media://asset 前缀，逐段编码', () => {
-    expect(assetUrl('whale-girl-emoji/01-happy.png'))
-      .toBe('pet-media://asset/whale-girl-emoji/01-happy.png')
+    expect(assetUrl('cyrene/stand/default.png'))
+      .toBe('pet-media://asset/cyrene/stand/default.png')
     expect(assetUrl(path.join('立绘 素材', 'stand-01.png')))
       .toBe(`pet-media://asset/${encodeURIComponent('立绘 素材')}/stand-01.png`)
   })
@@ -38,43 +38,30 @@ describe('assetUrl', () => {
 })
 
 describe('createAssetLibrary', () => {
-  it('列表情时给中文名，跳过非图片', async () => {
-    await touch('whale-girl-emoji/01-happy.png')
-    await touch('whale-girl-emoji/10-love.png')
-    await touch('whale-girl-emoji/README.md')
+  it('列表情时用文件名做展示名，跳过非图片', async () => {
+    await touch('demo-emoji/awesome.png')
+    await touch('demo-emoji/calm.png')
+    await touch('demo-emoji/README.md')
 
     const result = await createAssetLibrary({ root }).list()
 
     expect(result.ok).toBe(true)
     expect(result.total).toBe(2)
     expect(result.groups).toHaveLength(1)
-    expect(result.groups[0].name).toBe('表情 · 硬边')
-    expect(result.groups[0].items.map((item) => item.name)).toEqual(['开心', '比心'])
-    expect(result.groups[0].items[0].url).toBe('pet-media://asset/whale-girl-emoji/01-happy.png')
+    // 没有登记展示名的目录直接用目录名，不瞎猜。
+    expect(result.groups[0].name).toBe('demo-emoji')
+    expect(result.groups[0].items.map((item) => item.name)).toEqual(['awesome', 'calm'])
+    expect(result.groups[0].items[0].url).toBe('pet-media://asset/demo-emoji/awesome.png')
   })
 
-  it('立绘优先用 converted/ 的版本，原图不重复列', async () => {
-    await touch('whale-girl-stand/stand-01.jpg')
-    await touch('whale-girl-stand/converted/stand-01-600x800.png')
-    await touch('whale-girl-stand/converted/stand-02-600x800.png')
-    await touch('whale-girl-stand/converted/broken-404.png')
-
-    const result = await createAssetLibrary({ root }).list()
-
-    expect(result.total).toBe(2)
-    expect(result.groups[0].name).toBe('立绘')
-    expect(result.groups[0].items.map((item) => item.name)).toEqual(['立绘 01', '立绘 02'])
-    expect(result.groups[0].items[0].file).toBe('converted/stand-01-600x800.png')
-  })
-
-  it('没有 converted/ 时退回目录原图', async () => {
-    await touch('whale-girl-stand/stand-01.jpg')
+  it('没有登记名的目录里，子目录不会被递归列出', async () => {
+    await touch('demo-emoji/nested/deep.png')
+    await touch('demo-emoji/top.png')
 
     const result = await createAssetLibrary({ root }).list()
 
     expect(result.total).toBe(1)
-    expect(result.groups[0].items[0].file).toBe('stand-01.jpg')
-    expect(result.groups[0].items[0].name).toBe('立绘 01')
+    expect(result.groups[0].items[0].file).toBe('top.png')
   })
 
   it('目录不存在时报 assets-missing，而不是抛错', async () => {
@@ -122,7 +109,12 @@ describe('createAssetLibrary', () => {
     const result = await createAssetLibrary({ root: repoAssets }).list()
 
     expect(result.ok).toBe(true)
-    expect(result.groups.map((group) => group.id)).toEqual(['cyrene'])
+    // 仓库里的随包素材只留 cyrene；旧的 whale-girl 三组已删，不能再回来。
+    const ids = result.groups.map((group) => group.id)
+    expect(ids).toContain('cyrene')
+    expect(ids).not.toContain('whale-girl-stand')
+    expect(ids.some((id) => id.startsWith('whale-girl'))).toBe(false)
+    expect(new Set(ids).size).toBe(ids.length)
     expect(result.groups.every((group) => group.items.every((item) => item.url.startsWith('pet-media://asset/'))))
       .toBe(true)
     expect(result.total).toBe(result.groups.reduce((sum, group) => sum + group.items.length, 0))

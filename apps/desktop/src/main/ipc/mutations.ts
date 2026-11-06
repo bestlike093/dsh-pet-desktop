@@ -18,6 +18,16 @@ export interface MutationChannelDeps {
     setEnabled: (id: string, enabled: boolean) => Promise<AnyRecord>
     remove: (id: string) => Promise<unknown>
   }
+  /** 待审核表情：入库 / 丢弃都必须由用户显式点一次。 */
+  stickerInbox: {
+    list: () => Promise<AnyRecord[]>
+    approve: (id: string, options: AnyRecord) => Promise<AnyRecord>
+    reject: (id: string) => Promise<AnyRecord>
+  }
+  /** 打开独立表情包预览页；窗口生命周期由装配层管。 */
+  openStickerWindow: () => void
+  /** 把素材包里的表情发到最近一次 QQ 会话；失败回 ok:false。 */
+  sendQqSticker: (file: string) => Promise<AnyRecord>
   getSettings: () => AnyRecord
   setSettings: (next: AnyRecord) => void
   settingsPath: string
@@ -194,6 +204,74 @@ export function registerMutationChannels(deps: MutationChannelDeps): void {
     deps.applyIconSettings(true)
     deps.broadcastSettings(next)
     return { ok: true, packs: await deps.packStore.list() }
+  })
+
+  /**
+   * 表情包入库。只接受单个 id，拒绝批量；
+   * 素材包 id 与文件名都会在 stickerInbox 内再做一次清洗与越界检查。
+   */
+  register('pet:sticker:approve', async (_event, payload) => {
+    const id = typeof payload?.id === 'string' ? payload.id.trim() : ''
+    if (id === '') return { ok: false, code: 'INPUT_MISSING', message: '缺少待审核 id' }
+
+    const packId = typeof payload?.packId === 'string' ? payload.packId.trim() : ''
+    const name = typeof payload?.name === 'string' ? payload.name.trim() : ''
+    try {
+      const result = await deps.stickerInbox.approve(id, {
+        ...(packId === '' ? {} : { packId }),
+        ...(name === '' ? {} : { name })
+      })
+      deps.log('[sticker] 用户确认入库：', id)
+      return {
+        ok: true,
+        ...result,
+        items: await deps.stickerInbox.list(),
+        packs: await deps.packStore.list()
+      }
+    } catch (error) {
+      const message = describeError(error)
+      deps.log('[sticker] 入库失败：', message)
+      return { ok: false, code: 'APPROVE_FAILED', message }
+    }
+  })
+
+  /** 丢弃待审核图；删文件不可撤销，所以只接受单个 id。 */
+  register('pet:sticker:reject', async (_event, payload) => {
+    const id = typeof payload?.id === 'string' ? payload.id.trim() : ''
+    if (id === '') return { ok: false, code: 'INPUT_MISSING', message: '缺少待审核 id' }
+    try {
+      const result = await deps.stickerInbox.reject(id)
+      deps.log('[sticker] 用户丢弃：', id)
+      return { ok: true, ...result, items: await deps.stickerInbox.list() }
+    } catch (error) {
+      const message = describeError(error)
+      deps.log('[sticker] 丢弃失败：', message)
+      return { ok: false, code: 'REJECT_FAILED', message }
+    }
+  })
+
+  /** 打开独立预览页；只做窗口切换，不在打开时读盘。 */
+  register('pet:sticker:open', () => {
+    deps.openStickerWindow()
+    return { ok: true }
+  })
+
+  /**
+   * 发一张已入库的表情到最近一次 QQ 会话。
+   * file 由渲染层传素材包内相对路径，主进程仍会重新解析并做边界检查。
+   */
+  register('pet:sticker:send', async (_event, payload) => {
+    const file = typeof payload?.file === 'string' ? payload.file.trim() : ''
+    if (file === '') return { ok: false, code: 'INPUT_MISSING', message: '缺少表情文件' }
+    try {
+      const result = await deps.sendQqSticker(file)
+      deps.log('[sticker] 发送结果：', result.ok === true ? 'ok' : result.reason ?? 'failed')
+      return result
+    } catch (error) {
+      const message = describeError(error)
+      deps.log('[sticker] 发送失败：', message)
+      return { ok: false, code: 'SEND_FAILED', message }
+    }
   })
 
   /**

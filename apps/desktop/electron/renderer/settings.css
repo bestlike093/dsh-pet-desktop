@@ -167,6 +167,52 @@ body {
   font-weight: 650;
 }
 
+/* 右上角窗口控制：设置窗是 frame:false，系统按钮不会自己出现。 */
+.s-windowbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.s-win-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.s-win-btn {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background .16s ease, color .16s ease;
+}
+
+.s-win-btn:hover {
+  background: rgba(0, 0, 0, .06);
+  color: var(--ink);
+}
+
+.s-win-btn.s-win-close:hover {
+  background: var(--danger);
+  color: var(--white);
+}
+
+.s-win-btn svg {
+  width: 13px;
+  height: 13px;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  fill: none;
+  stroke-linecap: round;
+}
+
 .s-pagehead-desc {
   margin: 4px 0 0;
   font-size: 11.5px;
@@ -279,6 +325,11 @@ body {
 .s-search-empty strong {
   color: var(--cy-ink);
   font-size: 13px;
+}
+
+/* 搜索过滤：类名已经加到条目上，之前缺这条规则，输入后界面看起来毫无反应。 */
+.is-search-hidden {
+  display: none !important;
 }
 
 .item.is-search-hit {
@@ -641,6 +692,8 @@ select:focus {
   align-items: center;
   gap: 6px;
   margin-bottom: 10px;
+  /* 搜索框在 .s-nav 的拖动区里，必须显式退出拖动，否则点不进输入框。 */
+  -webkit-app-region: no-drag;
 }
 
 .s-search input {
@@ -851,6 +904,38 @@ select:focus {
   vertical-align: middle;
 }
 
+/* 内测未开放：控件留在原位，但不接受操作。不用 disabled，避免原生禁用样式与语义分叉。 */
+.beta-locked,
+.beta-locked .item-label,
+.beta-locked .item-hint {
+  color: var(--muted);
+}
+
+.beta-locked .switch {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.badge-locked {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border: 0;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--muted);
+  background: rgba(168, 146, 156, 0.14);
+  vertical-align: middle;
+  cursor: pointer;
+}
+
+.badge-locked:hover {
+  color: var(--text);
+  background: rgba(168, 146, 156, 0.24);
+}
+
 /* 不可交互的状态值：控件位不放假下拉，直接写清楚现在是什么状态 */
 .value-static {
   padding: 4px 10px;
@@ -872,9 +957,75 @@ select:focus {
   color: var(--cy-muted);
 }
 
+/* 三段式折叠说明：默认收起，展开才解释这一段管什么，避免首屏被长文案淹没。 */
+.hint-more {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--cy-border);
+  border-radius: 8px;
+  background: rgba(250, 246, 248, 0.6);
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--cy-muted);
+}
+
+.hint-more > summary {
+  cursor: pointer;
+  color: var(--cy-pink-deep);
+  font-weight: 600;
+  list-style: none;
+}
+
+.hint-more > summary::-webkit-details-marker {
+  display: none;
+}
+
+.hint-more > summary::before {
+  content: '▸';
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.16s ease;
+}
+
+.hint-more[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.hint-more-body {
+  margin-top: 6px;
+  display: grid;
+  gap: 4px;
+}
+
+.hint-more-body p {
+  margin: 0;
+}
+
+.hint-more-body strong {
+  color: var(--cy-ink-soft, var(--cy-ink));
+  margin-right: 6px;
+}
+
 /* 游戏日常：演练结果按行显示，路径与依赖各占一行 */
 .game-preview {
   white-space: pre-line;
+}
+
+/* 运行记录：一条一行，状态和时间靠左，模式和 id 靠右淡一点。 */
+.game-runs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.game-run {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  border-top: 1px dashed var(--cy-line);
+  font-size: 12px;
 }
 
 .game-days {
@@ -898,6 +1049,19 @@ select:focus {
 
 .char-count.is-full {
   color: var(--danger);
+}
+
+/* 人格分段：字数在左、恢复默认在右，别把按钮挤到下一行 */
+.persona-section-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.persona-section-foot .char-count {
+  margin-top: 0;
+  text-align: left;
 }
 
 /* 缩略图选择器：只看图就能选，选中项用主题色描边 */
@@ -958,6 +1122,62 @@ select:focus {
 
 /* ---------- 诊断 ---------- */
 
+/* 运行状态四卡片：QQ / 记忆 / 今天主动 / 上次反思，一眼能扫完。 */
+.status-cards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 12px 0 14px;
+}
+
+.status-card {
+  min-width: 0;
+  padding: 10px 12px 9px;
+  border: 1px solid var(--cy-border);
+  border-radius: var(--cy-radius);
+  background: var(--cy-surface);
+}
+
+.status-card-label {
+  font-size: 11px;
+  color: var(--cy-muted);
+}
+
+.status-card-value {
+  margin-top: 4px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--cy-ink);
+  word-break: break-word;
+}
+
+.status-card-value[data-tone='ok'] {
+  color: var(--cy-pink-deep);
+}
+
+.status-card-value[data-tone='off'] {
+  color: var(--cy-muted);
+}
+
+.status-card-value[data-tone='warn'] {
+  color: var(--cy-warn);
+}
+
+.status-card-note {
+  min-height: 14px;
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--cy-muted);
+  word-break: break-word;
+}
+
+@media (max-width: 760px) {
+  .status-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .diag-grid {
   display: grid;
   grid-template-columns: 96px 1fr;
@@ -1010,6 +1230,51 @@ select:focus {
   color: var(--cy-pink-deep);
   opacity: 0;
   transition: opacity 0.24s ease;
+}
+
+/* 保存反馈条：右上角浮出，不挤占布局；错误态改成红粉色。 */
+:root {
+  --s-toast-danger-border: #d9534f;
+  --s-toast-danger-ink: #a3312d;
+  --s-toast-danger-bg: #fff4f3;
+}
+
+.s-toast {
+  position: fixed;
+  top: 18px;
+  right: 22px;
+  z-index: 40;
+  max-width: min(340px, 70vw);
+  padding: 9px 14px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--cy-pink) 55%, transparent);
+  background: color-mix(in srgb, var(--cy-surface) 92%, var(--cy-pink) 8%);
+  color: var(--cy-ink);
+  font-size: 13px;
+  line-height: 1.5;
+  box-shadow: 0 6px 18px rgba(90, 40, 60, 0.14);
+  animation: s-toast-in 0.18s ease-out;
+}
+
+.s-toast.is-error {
+  border-color: var(--s-toast-danger-border);
+  color: var(--s-toast-danger-ink);
+  background: var(--s-toast-danger-bg);
+}
+
+.s-toast[hidden] {
+  display: none;
+}
+
+@keyframes s-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .saved-tip.show {
@@ -1309,6 +1574,51 @@ textarea:focus {
   font-size: 11.5px;
 }
 
+/* 记忆筛选：来源与分类并排，窄屏自动换行 */
+.memory-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 10px;
+  color: var(--cy-muted);
+  font-size: 12px;
+}
+
+.memory-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.memory-filter select {
+  padding: 3px 6px;
+  border: 1px solid var(--cy-border);
+  border-radius: 6px;
+  background: var(--cy-surface);
+  color: var(--cy-ink);
+  font-size: 12px;
+}
+
+/* 一行两个动作按钮：改、删 */
+.memory-actions {
+  grid-area: action;
+  align-self: center;
+  display: flex;
+  gap: 6px;
+}
+
+.memory-actions button {
+  padding: 3px 8px;
+  font-size: 11.5px;
+}
+
+.memory-text-editing {
+  outline: 1px dashed var(--cy-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+  cursor: text;
+}
+
 /* 素材包：列表只读展示，删除按钮单独一行右侧 */
 .pack-list {
   display: grid;
@@ -1399,6 +1709,23 @@ textarea:focus {
   word-break: break-word;
 }
 
+/* 「气泡旁贴纸」：下拉旁边给一个去表情包页的入口，待审核数量也带过去 */
+.sticker-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.sticker-pending {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 /* 窄窗口下把导航压窄，避免内容区只剩一点点宽度 */
 @media (max-width: 560px) {
   body {
@@ -1422,4 +1749,70 @@ textarea:focus {
   .range-wrap input[type="range"] {
     width: 96px;
   }
+}
+
+/* 「连接」页顶部的 QQ 机器人快捷入口：点一下直接滚到 AppID / AppSecret */
+.qq-jump {
+  display: block;
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 143, 199, 0.4);
+  border-radius: 10px;
+  background: rgba(255, 143, 199, 0.12);
+  color: inherit;
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.qq-jump::before {
+  content: "🤖 ";
+}
+
+.qq-jump:hover {
+  background: rgba(255, 143, 199, 0.22);
+}
+
+/* 游戏助手：风险门、周常账本、任务清单 */
+.game-assistant-panel {
+  margin: 8px 0 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--cy-line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+}
+
+.game-assistant-risk-list {
+  margin: 8px 0 10px;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.75;
+}
+
+.game-assistant-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 6px 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.game-assistant-check input {
+  margin-top: 2px;
+  flex: 0 0 auto;
+}
+
+.game-assistant-task {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px dashed var(--cy-line);
+}
+
+.game-assistant-task .item-text {
+  flex: 1 1 auto;
+  min-width: 0;
 }

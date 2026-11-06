@@ -76,11 +76,10 @@ body {
   animation: pet-breathe 4.6s ease-in-out infinite;
 }
 
-/* 拖动时收一点肩：只做视觉反馈，位置仍由主进程读光标决定。 */
+/* 拖动时只停呼吸动画，不再改 transform：窗口每帧移动时，缩放会让立绘
+   在合成层里重新采样，看起来像闪。位置反馈交给窗口移动本身就够了。 */
 #app[data-scene="cyrene"] #stage[data-dragging="1"] {
   animation: none;
-  transform: translateX(-50%) scale(0.985, 0.965);
-  transition: transform 70ms ease-out;
 }
 
 @keyframes pet-breathe {

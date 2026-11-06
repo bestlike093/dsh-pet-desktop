@@ -152,6 +152,22 @@ body {
   border-bottom-right-radius: 5px;
 }
 
+/* 照片气泡：留白收一收，让图自己占满框。 */
+.c-row.assistant .c-bubble.c-photo {
+  padding: 4px;
+  overflow: hidden;
+  line-height: 0;
+}
+
+.c-photo img {
+  display: block;
+  max-width: 190px;
+  max-height: 230px;
+  border-radius: 11px;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
 .c-meta {
   margin-top: 3px;
   font-size: 10px;

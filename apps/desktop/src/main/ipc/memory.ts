@@ -16,13 +16,35 @@ export interface MemoryChannelDeps {
     flush: () => Promise<void>
   }
   collectMemoryAll: () => AnyRecord[]
+  /** 结构化事实：偏好 / 人物 / 项目 / 约定。可读可改可删。 */
+  factStore?: {
+    load: () => Promise<unknown>
+    snapshot: (scope?: string) => {
+      total: number
+      active: number
+      archived: number
+      byScope?: Record<string, number>
+      facts: AnyRecord[]
+    }
+    remove?: (id: string) => { ok: boolean; reason?: string }
+    update?: (id: string, text: string) => { ok: boolean; reason?: string }
+    /** 备份用：JSONL 一行一条，能完整还原 scope / 强度 / 时间戳。 */
+    exportJsonl?: (options?: AnyRecord) => string
+    importJsonl?: (
+      text: string,
+      options?: AnyRecord
+    ) => { ok: boolean; reason?: string; added: number; merged: number; skipped: number; invalid: number }
+    flush?: () => Promise<void>
+  }
   sanitizeReflectionText: (text: string) => string
   dialog: {
     showSaveDialog: (options: AnyRecord) => Promise<{ canceled: boolean; filePath?: string }>
+    showOpenDialog?: (options: AnyRecord) => Promise<{ canceled: boolean; filePaths?: string[] }>
   }
   documentsDir: string
   pathJoin: (...parts: string[]) => string
   writeFile: (file: string, data: string, encoding: string) => Promise<void>
+  readFile?: (file: string, encoding: string) => Promise<string>
   log: (...args: any[]) => void
 }
 
@@ -115,6 +137,164 @@ export function registerMemoryChannels(deps: MemoryChannelDeps): void {
       return { ok: false, code: 'WRITE_FAILED', message }
     }
     return { ok: true, path: filePath, count: items.length }
+  })
+
+  /**
+   * 列出结构化事实；按「还活跃的在前、强度高的在前」排。
+   * payload.scope / payload.kind 可选：设置页按来源与分类筛选。
+   */
+  register('pet:memory:facts', async (_event, payload) => {
+    if (deps.factStore === undefined) return { ok: false, code: 'UNAVAILABLE', facts: [] }
+    try {
+      await deps.factStore.load()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      deps.log('[memory] 读取结构化事实失败：', message)
+      return { ok: false, code: 'LOAD_FAILED', facts: [] }
+    }
+    const wantedScope = typeof payload?.scope === 'string' ? payload.scope.trim() : ''
+    const wantedKind = typeof payload?.kind === 'string' ? payload.kind.trim() : ''
+    const snap = deps.factStore.snapshot()
+    const all = Array.isArray(snap.facts) ? snap.facts : []
+    const scopeCount: Record<string, number> = {}
+    for (const item of all) {
+      const scope = typeof item.scope === 'string' ? item.scope : 'desktop'
+      scopeCount[scope] = (scopeCount[scope] ?? 0) + 1
+    }
+    const filtered = all.filter((item) => {
+      if (wantedKind !== '' && item.kind !== wantedKind) return false
+      if (wantedScope === '') return true
+      const scope = typeof item.scope === 'string' ? item.scope : 'desktop'
+      if (wantedScope === 'all') return true
+      if (wantedScope === 'desktop') return scope === 'desktop' || scope === 'shared'
+      // qq 是聚合筛选：私聊和群聊一起看，但仍不混桌面。
+      if (wantedScope === 'qq') return scope.startsWith('qq:') || scope === 'shared'
+      return scope === wantedScope || scope === 'shared'
+    })
+    const facts = filtered
+      .map((item) => ({
+        id: item.id,
+        kind: item.kind,
+        text: item.text,
+        scope: typeof item.scope === 'string' ? item.scope : 'desktop',
+        strength: Math.round(Number(item.strength ?? 0) * 10) / 10,
+        mentions: Number(item.mentions ?? 0),
+        updatedAt: item.updatedAt ?? null,
+        archived: item.archived === true
+      }))
+      .sort((a, b) => Number(a.archived) - Number(b.archived) || b.strength - a.strength)
+    return {
+      ok: true,
+      total: facts.length,
+      allTotal: snap.total,
+      active: facts.filter((item) => !item.archived).length,
+      archived: facts.filter((item) => item.archived).length,
+      byScope: scopeCount,
+      facts
+    }
+  })
+
+  /** 删掉一条记错的事实。 */
+  register('pet:memory:facts:remove', async (_event, payload) => {
+    if (deps.factStore?.remove === undefined) return { ok: false, reason: 'unsupported' }
+    const id = typeof payload?.id === 'string' ? payload.id : ''
+    return deps.factStore.remove(id)
+  })
+
+  /** 改一条记错的事实：只换文字，保留来源和强度。 */
+  register('pet:memory:facts:update', async (_event, payload) => {
+    if (deps.factStore?.update === undefined) return { ok: false, reason: 'unsupported' }
+    const id = typeof payload?.id === 'string' ? payload.id : ''
+    const text = typeof payload?.text === 'string' ? payload.text : ''
+    return deps.factStore.update(id, text)
+  })
+
+  /** 导出结构化事实为 JSONL，换机或重装时能整份带走。 */
+  register('pet:memory:facts:export', async (_event, payload) => {
+    if (deps.factStore?.exportJsonl === undefined) return { ok: false, code: 'UNSUPPORTED' }
+    try {
+      await deps.factStore.load()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      deps.log('[memory] 导出结构化事实前读取失败：', message)
+      return { ok: false, code: 'LOAD_FAILED', message }
+    }
+    const scope = typeof payload?.scope === 'string' && payload.scope.trim() !== '' ? payload.scope.trim() : 'all'
+    const text = deps.factStore.exportJsonl({
+      scope,
+      includeArchived: payload?.includeArchived !== false
+    })
+    if (typeof text !== 'string' || text === '') return { ok: false, code: 'MEMORY_EMPTY' }
+
+    const stamp = new Date().toISOString().slice(0, 10)
+    const { canceled, filePath } = await deps.dialog.showSaveDialog({
+      title: '导出她记住的事',
+      defaultPath: deps.pathJoin(deps.documentsDir, `昔涟记忆-${stamp}.jsonl`),
+      filters: [
+        { name: 'JSON Lines', extensions: ['jsonl'] },
+        { name: 'JSON', extensions: ['json'] }
+      ]
+    })
+    if (canceled || typeof filePath !== 'string' || filePath === '') {
+      return { ok: false, canceled: true }
+    }
+    try {
+      await deps.writeFile(filePath, text, 'utf8')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      deps.log('[memory] 导出结构化事实失败：', message)
+      return { ok: false, code: 'WRITE_FAILED', message }
+    }
+    return { ok: true, path: filePath, count: text.split('\n').filter((line) => line.trim() !== '').length }
+  })
+
+  /** 导入 JSONL：坏行跳过并计数，同 id 的不会被重复写入，导入后立即落盘。 */
+  register('pet:memory:facts:import', async (_event, payload) => {
+    if (deps.factStore?.importJsonl === undefined) return { ok: false, code: 'UNSUPPORTED' }
+    if (deps.readFile === undefined || deps.dialog.showOpenDialog === undefined) {
+      return { ok: false, code: 'UNSUPPORTED' }
+    }
+    const { canceled, filePaths } = await deps.dialog.showOpenDialog({
+      title: '导入她记住的事',
+      properties: ['openFile'],
+      filters: [
+        { name: 'JSON Lines', extensions: ['jsonl'] },
+        { name: 'JSON', extensions: ['json'] },
+        { name: '全部文件', extensions: ['*'] }
+      ]
+    })
+    const file = Array.isArray(filePaths) ? filePaths[0] : undefined
+    if (canceled || typeof file !== 'string' || file === '') return { ok: false, canceled: true }
+
+    let text = ''
+    try {
+      text = await deps.readFile(file, 'utf8')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      deps.log('[memory] 读取导入文件失败：', message)
+      return { ok: false, code: 'READ_FAILED', message }
+    }
+
+    try {
+      await deps.factStore.load()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      deps.log('[memory] 导入前读取失败：', message)
+      return { ok: false, code: 'LOAD_FAILED', message }
+    }
+
+    const result = deps.factStore.importJsonl(text, {
+      scope: typeof payload?.scope === 'string' ? payload.scope : 'desktop',
+      includeArchived: payload?.includeArchived !== false
+    })
+    if (result.ok !== true) return result
+    try {
+      await deps.factStore.flush?.()
+    } catch (error) {
+      // 落盘失败不回滚内存结果：数据已经在，下一次写入会再试。
+      deps.log('[memory] 导入后落盘失败：', error instanceof Error ? error.message : String(error))
+    }
+    return { ...result, path: file }
   })
 
   /** 删除单条。id 必须来自列表；不认识就回 not-found，不静默成功。 */

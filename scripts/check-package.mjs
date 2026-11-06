@@ -189,6 +189,26 @@ const maps = entries.filter((e) => !e.dir && e.name.endsWith('.map'))
 check(debug || maps.length === 0, '⑧ 正式包无 *.map', `${maps.length} 个`)
 if (debug) console.log(`INFO sourcemap ${maps.length} 个（调试包通道）`)
 
+// ⑨ 版本标记：正式包的 edition.txt 必须与输出目录对得上，防止两版混发
+const editionFileInPkg = path.join(appRoot, 'apps', 'desktop', 'electron', 'edition.txt')
+const builtEdition = fs.existsSync(editionFileInPkg)
+  ? fs.readFileSync(editionFileInPkg, 'utf8').trim().toLowerCase()
+  : ''
+if (debug) {
+  check(
+    builtEdition === 'qiqi' || builtEdition === 'public',
+    '⑨ 调试包版本标记存在',
+    builtEdition || '缺失'
+  )
+} else {
+  const expectEdition = outName.includes('qiqi') ? 'qiqi' : 'public'
+  check(
+    builtEdition === expectEdition,
+    '⑨ 版本标记与产物一致',
+    `包内=${builtEdition || '缺失'} / 期望=${expectEdition}`
+  )
+}
+
 // 签名：dir 目标不做代码签名
 console.log('INFO 签名：不适用（dir 目标，未启用代码签名）')
 

@@ -27,7 +27,7 @@ describe('presenceIntervalMs', () => {
     expect(presenceIntervalMs(1.5)).toBe(1.5 * minute)
   })
 
-  it('非数值回默认 12 分钟', () => {
+  it('非数值回默认 45 分钟', () => {
     expect(presenceIntervalMs(undefined)).toBe(PRESENCE_INTERVAL_DEFAULT_MINUTES * minute)
     expect(presenceIntervalMs('abc')).toBe(PRESENCE_INTERVAL_DEFAULT_MINUTES * minute)
     expect(presenceIntervalMs(NaN)).toBe(PRESENCE_INTERVAL_DEFAULT_MINUTES * minute)

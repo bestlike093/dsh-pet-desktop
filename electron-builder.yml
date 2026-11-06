@@ -28,6 +28,9 @@ files:
   #    2026-11-02 实事故：presence.mjs 及后续拆出的模块没进白名单，
   #    打包后启动直接 ERR_MODULE_NOT_FOUND。
   - apps/desktop/electron/*.mjs
+  # 版本标记：qiqi / public，由 scripts/package.mjs --edition=xxx 写入。
+  # 运行时不读环境变量也认得出自己是哪一版，公开版据此整条关闭亲密层。
+  - apps/desktop/electron/edition.txt
   - apps/desktop/electron/renderer/**
   - apps/desktop/dist/**
   # ⚠️ 托盘图标实际在 electron/assets/ 下。原来写的 apps/desktop/assets/tray.png

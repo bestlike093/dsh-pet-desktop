@@ -16,7 +16,11 @@ import type {
 } from '@pet/shared'
 import type { WebSocketClient } from './websocket-client.js'
 import { QqBotApiClient } from './qqbot-api-client.js'
-import type { QqBotSendOptions, QqBotSendTarget } from './qqbot-api-client.js'
+import type {
+  QqBotImagePayload,
+  QqBotSendOptions,
+  QqBotSendTarget
+} from './qqbot-api-client.js'
 import { QqBotWsClient } from './qqbot-ws-client.js'
 import type { QqBotEventType } from './qqbot-ws-client.js'
 
@@ -28,6 +32,70 @@ export interface QqGatewayApi {
     content: string,
     options: QqBotSendOptions
   ) => Promise<void>
+  /** 可选：发图能力。测试桩不实现时，replyImage 直接回 false。 */
+  sendImage?: (
+    target: QqBotSendTarget,
+    image: QqBotImagePayload,
+    options: QqBotSendOptions
+  ) => Promise<void>
+}
+
+/** 一条入站消息的发送者信息；观察模式靠它把 openid 交给宿主。 */
+export interface QqGatewayInbound {
+  readonly chatType: 'private' | 'group'
+  /** 投递地址：C2C 为用户 openid，群为 group_openid */
+  readonly openId: string
+  readonly senderOpenId: string
+  /**
+   * 可选原文：只有需要判断「这句话是不是在叫我」时才带。
+   * 只存在内存里，不落盘、不写日志；图片消息为空串。
+   */
+  readonly content?: string
+  readonly msgId?: string
+  /** 群里的 @ 消息：平台只会在明确叫到机器人时推这个事件。 */
+  readonly mentioned?: boolean
+  /** 发送者是否在主人名单里；宿主据此区分主人的私聊和群里的任何人。 */
+  readonly isOwner?: boolean
+}
+
+/** QQ 消息里的一张图片；URL 有效期很短，宿主拿到后要立刻下载。 */
+export interface QqGatewayImage {
+  readonly url: string
+  readonly contentType: string
+  readonly filename: string
+  readonly size: number
+}
+
+/** 主人发来的一条普通消息；宿主用它走聊天回复，不参与拍板解析。 */
+export interface QqGatewayMessage extends QqGatewayInbound {
+  readonly content: string
+  readonly msgId: string
+  readonly images: readonly QqGatewayImage[]
+}
+
+/** 只留在内存里的近期消息，用来学一群人的说话方式；不落盘、不外传。 */
+export interface QqObservedMessage {
+  readonly speaker: string
+  readonly text: string
+  readonly at: number
+  /** 这条是否明确 @ 了机器人（平台只把这类群消息推成 GROUP_AT_MESSAGE_CREATE）。 */
+  readonly mentioned?: boolean
+  /** 图片 / 表情包数量，只用来估计表情包使用率。 */
+  readonly imageCount?: number
+}
+
+/**
+ * 群生命周期事件：机器人被拉进群、被移出群。
+ *
+ * 消息突然收不到时，靠这一条区分「平台没推」和「人已经不在群里」。
+ * 只用于诊断，不参与权限判断。
+ */
+export interface QqGroupLifecycle {
+  readonly type: 'GROUP_ADD_ROBOT' | 'GROUP_DEL_ROBOT'
+  readonly groupOpenId: string
+  /** 拉人 / 踢人的群成员；平台不提供时为空串。 */
+  readonly operatorOpenId: string
+  readonly at: number
 }
 
 export interface QqGatewayChannelOptions {
@@ -45,6 +113,18 @@ export interface QqGatewayChannelOptions {
   readonly onLog?: (message: string) => void
   /** 连接层的最后一次错误，交给宿主展示；重连成功后会由 onReadyChange 清掉。 */
   readonly onError?: (error: Error) => void
+  /**
+   * 每条入站消息都会回调一次，且不受主人名单限制。
+   * 观察模式靠它把发送者 openid 交回宿主，让用户在设置页一键绑定。
+   */
+  readonly onInbound?: (info: QqGatewayInbound) => void
+  /**
+   * 主人发来的普通文本。与 onInbound 分开：onInbound 只负责观察与绑定，
+   * onMessage 才允许宿主生成回复，避免把任何陌生人都接进聊天链路。
+   */
+  readonly onMessage?: (info: QqGatewayMessage) => void
+  /** 机器人进群 / 退群时回调一次，用来把「突然收不到群消息」的原因留进日志。 */
+  readonly onSystemEvent?: (event: QqGroupLifecycle) => void
 }
 
 interface SessionState {
@@ -71,6 +151,17 @@ function textOf(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
 }
 
+/**
+ * 群 @ 的原文会带 <@!...> 标记；剥掉之后模型才看到干净的正文。
+ * 机器人 openid 并不总是纯数字（新版是字符串 ID），所以这里不能只匹配 \d。
+ */
+function stripMentions(value: string): string {
+  return value
+    .replace(/<@!?[^>\s]+>/g, ' ')
+    .replace(/[ \t\u3000]+/g, ' ')
+    .trim()
+}
+
 function senderOpenId(data: Record<string, unknown>): string {
   const author = isRecord(data['author']) ? data['author'] : {}
   for (const key of ['user_openid', 'member_openid', 'openid']) {
@@ -78,6 +169,30 @@ function senderOpenId(data: Record<string, unknown>): string {
     if (value !== '') return value
   }
   return ''
+}
+
+/** 从 attachments 里挑出图片；只收 https 地址，其余一律忽略。 */
+function imagesOf(data: Record<string, unknown>): QqGatewayImage[] {
+  const raw = data['attachments']
+  if (!Array.isArray(raw)) return []
+
+  const images: QqGatewayImage[] = []
+  for (const item of raw) {
+    if (!isRecord(item)) continue
+    const contentType = textOf(item['content_type']).toLowerCase()
+    if (!contentType.startsWith('image/')) continue
+    const url = textOf(item['url'])
+    if (!url.startsWith('https://')) continue
+    const size = Number(item['size'] ?? 0)
+    images.push({
+      url,
+      contentType,
+      filename: textOf(item['filename']),
+      size: Number.isFinite(size) ? size : 0
+    })
+    if (images.length >= 4) break
+  }
+  return images
 }
 
 function formatEnvelope(envelope: DecisionEnvelope, now: number): string {
@@ -102,6 +217,10 @@ export class QqGatewayChannel implements IChannelAdapter {
   private readonly readyHandlers = new Set<(ready: boolean) => void>()
   private readonly sessions = new Map<string, SessionState>()
   private readonly pending = new Map<string, DecisionEnvelope[]>()
+  /** 每个会话最近若干条文本，只用于统计语气和找重复出现的说法。 */
+  private readonly observed = new Map<string, QqObservedMessage[]>()
+  /** 200 条样本：活跃群一天就能刷满，样本太少画像会抖。 */
+  private static readonly OBSERVED_LIMIT = 200
   private ws: QqBotWsClient | null = null
   private started = false
   private lastInboundKey = ''
@@ -121,6 +240,38 @@ export class QqGatewayChannel implements IChannelAdapter {
 
   capabilities(): ChannelCapabilities {
     return { approval: true, question: true, richCard: false, memorySync: false }
+  }
+
+  /**
+   * 最近几条消息，只给「这群人怎么说话」做统计。
+   * 只存在内存里，重启就清空；调用方不该把它写进记忆或日志。
+   */
+  recentMessages(key: string, limit = 40): readonly QqObservedMessage[] {
+    const list = this.observed.get(key) ?? []
+    const size = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 40
+    return list.slice(-size)
+  }
+
+  /** 记一条观察样本；超出上限时丢最旧的。 */
+  private observe(
+    key: string,
+    speaker: string,
+    text: string,
+    extra?: { mentioned?: boolean; imageCount?: number }
+  ): void {
+    const list = this.observed.get(key) ?? []
+    const rawImages = extra?.imageCount
+    list.push({
+      speaker,
+      text: text.slice(0, 200),
+      at: this.now(),
+      mentioned: extra?.mentioned === true,
+      imageCount: Number.isFinite(rawImages) ? Math.max(0, Math.floor(Number(rawImages))) : 0
+    })
+    if (list.length > QqGatewayChannel.OBSERVED_LIMIT) {
+      list.splice(0, list.length - QqGatewayChannel.OBSERVED_LIMIT)
+    }
+    this.observed.set(key, list)
   }
 
   onReply(handler: (reply: DecisionReply) => void): () => void {
@@ -204,6 +355,71 @@ export class QqGatewayChannel implements IChannelAdapter {
     return { messageId: envelope.id, queued: true }
   }
 
+  /**
+   * 用当前被动回复窗口发一条普通文本。
+   * 只对已有入站会话有效；窗口过期或次数用尽时返回 false，不排队。
+   */
+  async replyText(
+    chatType: 'private' | 'group',
+    openId: string,
+    content: string
+  ): Promise<boolean> {
+    const text = content.trim()
+    if (text === '') return false
+
+    const session = this.sessions.get(`${chatType}:${openId}`)
+    if (session === undefined || !this.canReply(session)) {
+      this.log(`[qq] 不回复 ${chatType}:${openId}：不在被动回复窗口或次数已用尽`)
+      return false
+    }
+
+    try {
+      await this.api.sendText(
+        { openid: session.openId, chatType: session.chatType },
+        text.slice(0, 1000),
+        { msgId: session.lastMsgId, msgSeq: session.replyCount + 1 }
+      )
+      session.replyCount += 1
+      return true
+    } catch (error) {
+      this.log(
+        `[qq] 聊天回复失败：${error instanceof Error ? error.message : String(error)}`
+      )
+      return false
+    }
+  }
+
+  /**
+   * 用当前被动回复窗口发一张图片。
+   * 失败原因会写日志并回 false；调用方据此给用户一句人话。
+   */
+  async replyImage(contentType: string, bytes: Uint8Array): Promise<boolean> {
+    if (bytes.byteLength === 0) return false
+    if (this.api.sendImage === undefined) {
+      this.log('[qq] 当前 API 客户端不支持发图')
+      return false
+    }
+
+    const session = this.resolveSession()
+    if (session === undefined || session === null || !this.canReply(session)) {
+      this.log('[qq] 不发图：没有可用的被动回复会话或次数已用尽')
+      return false
+    }
+
+    try {
+      await this.api.sendImage(
+        { openid: session.openId, chatType: session.chatType },
+        { contentType, bytes },
+        { msgId: session.lastMsgId, msgSeq: session.replyCount + 1 }
+      )
+      session.replyCount += 1
+      return true
+    } catch (error) {
+      this.log(`[qq] 发图失败：${error instanceof Error ? error.message : String(error)}`)
+      return false
+    }
+  }
+
   async health(): Promise<DiagResult> {
     if (this.options.appId === '' || this.options.clientSecret === '') {
       return {
@@ -244,6 +460,26 @@ export class QqGatewayChannel implements IChannelAdapter {
   }
 
   private handleDispatch(type: QqBotEventType, data: Record<string, unknown>): void {
+    // 进群 / 退群不是消息，但它决定了之后还有没有消息可收。
+    // 先把这一笔写进日志，群里突然安静时才不用靠猜。
+    if (type === 'GROUP_ADD_ROBOT' || type === 'GROUP_DEL_ROBOT') {
+      const groupOpenId = textOf(data['group_openid'])
+      const operatorOpenId = textOf(data['op_member_openid'])
+      const added = type === 'GROUP_ADD_ROBOT'
+      this.log(
+        added
+          ? `[qq] 机器人已进群 group=${groupOpenId}`
+          : `[qq] 机器人已被移出群 group=${groupOpenId}`
+      )
+      this.options.onSystemEvent?.({
+        type,
+        groupOpenId,
+        operatorOpenId,
+        at: this.now()
+      })
+      return
+    }
+
     if (
       type !== 'C2C_MESSAGE_CREATE' &&
       type !== 'GROUP_AT_MESSAGE_CREATE' &&
@@ -253,7 +489,6 @@ export class QqGatewayChannel implements IChannelAdapter {
     }
 
     const sender = senderOpenId(data)
-    const content = textOf(data['content'])
     const msgId = textOf(data['id'])
     if (sender === '' || msgId === '') return
 
@@ -262,10 +497,37 @@ export class QqGatewayChannel implements IChannelAdapter {
     const chatType: 'private' | 'group' = groupOpenId === '' ? 'private' : 'group'
     const openId = chatType === 'group' ? groupOpenId : sender
     const key = `${chatType}:${openId}`
+    const isOwner = this.owners.has(sender)
+    // 平台只会把明确叫到机器人的群消息推成 GROUP_AT_MESSAGE_CREATE。
+    const mentioned = type === 'GROUP_AT_MESSAGE_CREATE'
+    const content = mentioned
+      ? stripMentions(textOf(data['content']))
+      : textOf(data['content'])
+    // 图片 / 表情包只数数量，不下载、不保存；用来估计这群人有多爱发表情。
+    const attachments = Array.isArray(data['attachments']) ? data['attachments'] : []
+    const imageCount = attachments.filter((item) => {
+      if (item === null || typeof item !== 'object') return false
+      const type = textOf((item as Record<string, unknown>)['content_type'])
+      return type.startsWith('image') || type === 'sticker'
+    }).length
 
     const session = this.upsertSession(key, chatType, openId, sender, msgId)
     this.lastInboundKey = key
     this.log(`[qq] 入站 ${key} msg=${msgId}`)
+    // 先记一条观察样本：不管是不是主人、回不回复，都能学到这群人怎么说话。
+    if (content !== '') this.observe(key, sender, content, { mentioned, imageCount })
+
+    // 观察模式要先拿到来源，才能让用户在设置页绑定主人；这里不吃主人名单。
+    // 顺带把原文交给宿主：群聊里有人只是叫了名字时，宿主才有机会轻轻应一声。
+    this.options.onInbound?.({
+      chatType,
+      openId,
+      senderOpenId: sender,
+      ...(content === '' ? {} : { content }),
+      msgId,
+      ...(mentioned ? { mentioned: true } : {}),
+      ...(isOwner ? { isOwner: true } : {})
+    })
 
     // 首条消息前 send() 只能把卡片挂在 unbound 上；有了会话就把它接过来，
     // 否则这些卡片会永远等不到 flush。
@@ -279,7 +541,29 @@ export class QqGatewayChannel implements IChannelAdapter {
     // 先补发之前排队的卡片；补发会消耗这次的被动回复次数。
     void this.flush(session)
 
-    if (content === '' || !this.owners.has(sender)) return
+    const images = imagesOf(data)
+    // 纯图片消息没有文本，也要交给宿主；否则偷表情包永远收不到。
+    if (content === '' && images.length === 0) return
+
+    // 群里被 @ 是明确在叫她，任何人都该得到回应；私聊与普通群消息仍只接受主人。
+    if (!isOwner && !mentioned) return
+
+    this.options.onMessage?.({
+      chatType,
+      openId,
+      senderOpenId: sender,
+      content,
+      msgId,
+      images,
+      ...(mentioned ? { mentioned: true } : {}),
+      ...(isOwner ? { isOwner: true } : {})
+    })
+
+    // 非主人只能聊天，不能拍板。
+    if (!isOwner) return
+
+    // 没有文本就没有可解析的指令，到此为止。
+    if (content === '') return
     const parsed = this.parseCommand(content)
     if (parsed === null) return
 

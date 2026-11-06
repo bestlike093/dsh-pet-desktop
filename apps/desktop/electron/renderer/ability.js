@@ -265,10 +265,26 @@ async function runAction(action) {
     case 'models':
       toggleAssetsPanel()
       return
+    case 'stickers':
+      try {
+        await window.pet.openStickerWindow()
+        appendLog('已打开表情包预览页')
+      } catch (error) {
+        appendLog(`打开表情包失败：${error instanceof Error ? error.message : String(error)}`)
+      }
+      return
     case 'memory':
     case 'voice':
     case 'status':
       await openSettingsPanel(action)
+      return
+    case 'insight':
+      try {
+        await window.pet.openInsight()
+        appendLog('已打开观察台')
+      } catch (error) {
+        appendLog(`打开观察台失败：${error instanceof Error ? error.message : String(error)}`)
+      }
       return
     case 'balance':
       await showBalance()

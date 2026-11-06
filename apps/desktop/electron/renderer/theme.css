@@ -48,6 +48,8 @@
   --cy-ink: var(--ink);
   --cy-muted: var(--muted);
   --cy-shadow: var(--shadow);
+  /* 提醒色：余额、记忆写入这类「需要看一眼」的状态用，不参与粉色强调 */
+  --cy-warn: #c27a2c;
 
   --pink: var(--accent);
   --pink-deep: var(--accent-deep);

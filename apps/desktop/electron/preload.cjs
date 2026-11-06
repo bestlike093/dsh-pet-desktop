@@ -38,6 +38,8 @@ contextBridge.exposeInMainWorld('pet', {
     ipcRenderer.invoke('pet:secrets:clear', { serviceId, field }),
   qqTest: () => ipcRenderer.invoke('pet:qq:test'),
   qqStatus: () => ipcRenderer.invoke('pet:qq:status'),
+  // 观察模式下把最近一条入站消息的发送者绑成主人；成功后主进程会重建通道。
+  bindQqOwner: () => ipcRenderer.invoke('pet:qq:bind-owner'),
   // 语音：气泡出字时来要声音，主进程合完把音频交回来，自己负责播放。
   // 失败一律返回 ok:false，渲染侧静默跳过——没声音不该影响出字。
   // reason=manual 表示点小喇叭，不受「只在小喇叭被点时」这条设置挡。
@@ -61,14 +63,46 @@ contextBridge.exposeInMainWorld('pet', {
   exportChat: () => ipcRenderer.invoke('pet:chat:export'),
   openChat: () => ipcRenderer.invoke('pet:chat:open'),
   closeChat: () => ipcRenderer.invoke('pet:chat:close'),
+  // 拍一张照：只回 { ok, photo:{ path, at, bytes } }，图像字节不进渲染层。
+  takePhoto: () => ipcRenderer.invoke('pet:photo:take'),
   // 记忆：统计与分页读取；单条删除按 id 走，清空仍是整份清空。
   getMemoryStats: () => ipcRenderer.invoke('pet:memory:stats'),
+  // 结构化事实：偏好 / 人物 / 项目 / 约定，只读。
+  getMemoryFacts: (options) => ipcRenderer.invoke('pet:memory:facts', options),
+  removeMemoryFact: (id) => ipcRenderer.invoke('pet:memory:facts:remove', { id }),
+  updateMemoryFact: (id, text) => ipcRenderer.invoke('pet:memory:facts:update', { id, text }),
+  exportMemoryFacts: (options) => ipcRenderer.invoke('pet:memory:facts:export', options),
+  importMemoryFacts: (options) => ipcRenderer.invoke('pet:memory:facts:import', options),
+  // 陪伴日程：读今天这份单，或把手动顺延的分钟数交给主进程判断。
+  companionAgenda: () => ipcRenderer.invoke('pet:companion:agenda'),
+  rescheduleAgenda: (minutes) => ipcRenderer.invoke('pet:companion:agenda:reschedule', { minutes }),
+  // 观察台：整份只读快照；写动作只落在指定会话上，桌面与各群互不影响。
+  openInsight: (tab) =>
+    ipcRenderer.invoke('pet:insight:open', typeof tab === 'string' ? { tab } : {}),
+  // 观察台已开着时，主进程只发一条切页请求，不重新加载整页。
+  onInsightTab: (callback) => {
+    if (typeof callback !== 'function') return () => {}
+    const listener = (_event, tab) => callback(tab)
+    ipcRenderer.on('pet:insight:select-tab', listener)
+    return () => ipcRenderer.removeListener('pet:insight:select-tab', listener)
+  },
+  getInsightSnapshot: (options) => ipcRenderer.invoke('pet:insight:snapshot', options),
+  setInsightFavor: (scope, value, note) =>
+    ipcRenderer.invoke('pet:insight:set-favor', { scope, value, note }),
+  adjustInsightFavor: (scope, delta, note) =>
+    ipcRenderer.invoke('pet:insight:adjust-favor', { scope, delta, note }),
+  lockInsightFavor: (scope, locked) =>
+    ipcRenderer.invoke('pet:insight:lock-favor', { scope, locked }),
+  resetInsightScope: (scope) => ipcRenderer.invoke('pet:insight:reset-scope', { scope }),
+  deleteInsightMemory: (id) => ipcRenderer.invoke('pet:insight:delete-memory', { id }),
   listMemory: (options) => ipcRenderer.invoke('pet:memory:list', options),
   deleteMemory: (id) => ipcRenderer.invoke('pet:memory:delete', { id }),
   exportMemory: (options) => ipcRenderer.invoke('pet:memory:export', options),
   clearMemory: () => ipcRenderer.invoke('pet:memory:clear'),
   // 启动前体检：一次拿齐模型、密钥、语音配置、磁盘与 Vault 状态。
   preflight: () => ipcRenderer.invoke('pet:preflight'),
+  // 运行状态四卡片：只读汇总，不触发重连或模型请求。
+  statusSummary: () => ipcRenderer.invoke('pet:status:summary'),
   // 人格预览：主进程真实拼装结果，供设置页展示。
   getPersonaPreview: () => ipcRenderer.invoke('pet:persona:preview'),
   // 右键桌宠：交给主进程弹原生菜单，渲染侧不自己画浮层。
@@ -76,6 +110,8 @@ contextBridge.exposeInMainWorld('pet', {
   // 独立设置窗：打开 / 关闭 / 应用尺寸 / 读实时状态。
   openSettings: (panel) => ipcRenderer.invoke('pet:settings:open', { panel }),
   closeSettings: () => ipcRenderer.invoke('pet:settings:close'),
+  minimizeSettings: () => ipcRenderer.invoke('pet:settings:minimize'),
+  toggleMaximizeSettings: () => ipcRenderer.invoke('pet:settings:toggleMaximize'),
   applyWindowSize: () => ipcRenderer.invoke('pet:window:applySize'),
   getWindowSize: () => ipcRenderer.invoke('pet:window:getSize'),
   getRenderInfo: () => ipcRenderer.invoke('pet:render:info'),
@@ -92,6 +128,8 @@ contextBridge.exposeInMainWorld('pet', {
   backupChooseDir: () => ipcRenderer.invoke('pet:backup:chooseDir'),
   backupSetKeep: (keep) => ipcRenderer.invoke('pet:backup:setKeep', { keep }),
   backupRun: (password) => ipcRenderer.invoke('pet:backup:run', { password }),
+  // 恢复出厂：主进程清完数据会自行重启，渲染侧只等这一次调用返回。
+  factoryReset: () => ipcRenderer.invoke('pet:factory:reset'),
   // 自动备份：开启时若传了口令，主进程用系统密钥加密保存，渲染侧拿不到明文。
   backupSetAuto: (intervalDays, password) =>
     ipcRenderer.invoke('pet:backup:setAuto', { intervalDays, password }),
@@ -99,6 +137,11 @@ contextBridge.exposeInMainWorld('pet', {
   vaultImport: (password) => ipcRenderer.invoke('pet:vault:import', { password }),
   // 轮换数据密钥：新写入换新钥，旧数据仍按原 keyId 可读。
   vaultRotate: () => ipcRenderer.invoke('pet:vault:rotate'),
+  // 语音唤醒：默认关闭。运行时按需下载，装不装由用户决定；主进程不把音频交出来。
+  wakeStatus: () => ipcRenderer.invoke('pet:wake:status'),
+  wakeInstall: () => ipcRenderer.invoke('pet:wake:install'),
+  wakeRemove: () => ipcRenderer.invoke('pet:wake:remove'),
+  wakeSetEnabled: (enabled) => ipcRenderer.invoke('pet:wake:setEnabled', { enabled: enabled === true }),
   // 每日巡视与反思：手动触发一次，返回真实结果（没有数据也会说明原因）。
   dailyRun: () => ipcRenderer.invoke('pet:daily:run'),
   dailyLast: () => ipcRenderer.invoke('pet:daily:last'),
@@ -111,8 +154,34 @@ contextBridge.exposeInMainWorld('pet', {
   gameScheduleGet: () => ipcRenderer.invoke('pet:game:schedule:get'),
   gameScheduleSave: (config) => ipcRenderer.invoke('pet:game:schedule:save', config),
   gameDryRun: (config) => ipcRenderer.invoke('pet:game:dry-run', config),
+  // 多游戏日常：每个游戏一份排班，注册计划任务后由 runner 无值守执行。
+  gameDailyState: () => ipcRenderer.invoke('pet:game:daily:state'),
+  gameDailyUpdate: (input) => ipcRenderer.invoke('pet:game:daily:update', input),
+  gameDailyPlan: () => ipcRenderer.invoke('pet:game:daily:plan'),
+  gameDailyApply: () => ipcRenderer.invoke('pet:game:daily:apply'),
+  gameDailyQuery: () => ipcRenderer.invoke('pet:game:daily:query'),
+  gameDailyDisable: (games) => ipcRenderer.invoke('pet:game:daily:disable', games),
+  gameDailyRuns: (input) => ipcRenderer.invoke('pet:game:daily:runs', input),
+  // 游戏助手：默认关闭，连续两次风险确认后才允许生成任务计划。
+  gameAssistantStatus: () => ipcRenderer.invoke('pet:game:assistant:status'),
+  gameAssistantConfirm: (input) => ipcRenderer.invoke('pet:game:assistant:confirm', input),
+  gameAssistantDisable: () => ipcRenderer.invoke('pet:game:assistant:disable'),
+  gameAssistantRecord: (entry) => ipcRenderer.invoke('pet:game:assistant:record', entry),
+  gameAssistantClaim: (id) => ipcRenderer.invoke('pet:game:assistant:claim', id),
+  gameAssistantRank: (rank) => ipcRenderer.invoke('pet:game:assistant:rank', rank),
+  gameAssistantPlan: (taskId) => ipcRenderer.invoke('pet:game:assistant:plan', taskId),
   // 随包素材：只回名称与 pet-media 地址，渲染侧拿不到磁盘路径。
   listAssets: () => ipcRenderer.invoke('pet:assets:list'),
+  // 表情包：QQ 偷来的图先进待审核队列，入库 / 丢弃必须由用户逐张点。
+  listStickerInbox: () => ipcRenderer.invoke('pet:sticker:inbox'),
+  // 表情库：内置素材 + 用户素材包，只读。
+  listStickerLibrary: () => ipcRenderer.invoke('pet:sticker:library'),
+  approveSticker: (id, options) =>
+    ipcRenderer.invoke('pet:sticker:approve', { id, ...(options ?? {}) }),
+  rejectSticker: (id) => ipcRenderer.invoke('pet:sticker:reject', { id }),
+  openStickerWindow: () => ipcRenderer.invoke('pet:sticker:open'),
+  // 只接受素材包内相对路径或 pet-media://pack/...，主进程会重新校验。
+  sendSticker: (file) => ipcRenderer.invoke('pet:sticker:send', { file }),
   // 桌面状态条：先取一次快照，之后由主进程按 3 秒 / 6 秒两拍推送。
   systemStats: () => ipcRenderer.invoke('pet:system:stats'),
   // 心情：主进程按时间与对话间隔算出来的真实状态，只回标签与等级。

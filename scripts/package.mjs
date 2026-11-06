@@ -1,8 +1,11 @@
 // 打包入口：正式包与调试包分目录，sourcemap 永不进正式包。
 //
 // 用法：
-//   node scripts/package.mjs                  # 正式包 -> dist-pkg
-//   node scripts/package.mjs --include-debug  # 调试包 -> dist-pkg-debug（构建时带 sourcemap）
+//   node scripts/package.mjs --edition=qiqi    # 私人版 -> dist-pkg-qiqi（放开，仅本机）
+//   node scripts/package.mjs --edition=public  # 公开版 -> dist-pkg（合规，可对外）
+//   node scripts/package.mjs --include-debug   # 调试包 -> dist-pkg-debug（构建时带 sourcemap）
+//
+// 不传 --edition 时按公开版处理：宁可收住，也不误发。
 //
 // 正式包与调试包各自先构建再打包；调试包的 map 只落在 dist-pkg-debug，
 // check-package 会断言正式包内 *.map 为 0。
@@ -15,8 +18,15 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const debug = process.argv.includes('--include-debug')
-const outName = debug ? 'dist-pkg-debug' : 'dist-pkg'
+const editionArg = process.argv.find((arg) => arg.startsWith('--edition='))
+const edition = (editionArg ? editionArg.slice('--edition='.length) : 'public').trim().toLowerCase()
+if (edition !== 'qiqi' && edition !== 'public') {
+  console.error(`FAIL 未知版本 "${edition}"：只接受 --edition=qiqi 或 --edition=public`)
+  process.exit(1)
+}
+const outName = debug ? 'dist-pkg-debug' : edition === 'qiqi' ? 'dist-pkg-qiqi' : 'dist-pkg'
 const outDir = path.join(root, outName)
+const editionFile = path.join(root, 'apps', 'desktop', 'electron', 'edition.txt')
 const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
 
 function run(args) {
@@ -35,6 +45,11 @@ function walk(dir, out = []) {
   }
   return out
 }
+
+console.log(`=== 版本：${edition === 'qiqi' ? '私人版（放开）' : '公开版（合规）'} ===`)
+// 构建前写进源码目录，随 apps/desktop/electron/*.txt 进包；结束后恢复原值。
+const previousEdition = fs.existsSync(editionFile) ? fs.readFileSync(editionFile, 'utf8') : null
+fs.writeFileSync(editionFile, `${edition}\n`, 'utf8')
 
 console.log(`=== 构建（${debug ? '调试包 / sourcemap 开' : '正式包'}）===`)
 run(['-r', 'run', 'build'])
@@ -61,10 +76,13 @@ try {
     fs.writeFileSync(debugConfigPath, text, 'utf8')
     run(['exec', 'electron-builder', '--dir', '--win', '--config', 'electron-builder.debug.yml'])
   } else {
-    run(['exec', 'electron-builder', '--dir', '--win'])
+    run(['exec', 'electron-builder', '--dir', '--win', `--config.directories.output=${outName}`])
   }
 } finally {
   if (debugConfigPath && fs.existsSync(debugConfigPath)) fs.unlinkSync(debugConfigPath)
+  // 源码目录保持原状，避免本地开发被上一次打包的版本带走。
+  if (previousEdition === null) fs.rmSync(editionFile, { force: true })
+  else fs.writeFileSync(editionFile, previousEdition, 'utf8')
 }
 
 // 校验和锁 resources/app；文件放 resources/ 下，随包分发但不进 git。

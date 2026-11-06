@@ -46,6 +46,8 @@ export interface IconSettings {
 /** 气泡旁贴纸：空串 = 关闭，pack:<id>:<file> = 包内表情。 */
 export interface StickerSettings {
   readonly source: string
+  /** QQ 偷来的表情是否免审核直接入库；关掉后先进待审核队列。 */
+  readonly autoApprove: boolean
 }
 
 export interface ModuleToggle {
@@ -75,6 +77,8 @@ export interface QqChannelConfig {
   readonly publicKey: string
   /** webhook 模式监听端口；默认只监听本机。 */
   readonly webhookPort: number
+  /** 是否跟着群里的格式说话（分几条、@ 人、发表情）；默认开，用户可关掉。 */
+  readonly imitateFormat: boolean
 }
 
 export interface ChannelsConfig {
@@ -138,6 +142,19 @@ export type VoiceLocalProtocol = 'generic' | 'gpt-sovits'
 /** 界面语言。只影响界面文案，不改角色说话的语言。 */
 export type Locale = 'zh-CN' | 'en-US'
 
+/**
+ * 向量检索。
+ *
+ * 默认 auto：填了地址就走 OpenAI 兼容接口，没填就短探一次本地 Ollama，
+ * 两条都不通就安静退回 BM25。Key 不写在这里，走密钥仓库或环境变量。
+ */
+export interface EmbeddingSettings {
+  readonly provider: 'auto' | 'openai' | 'ollama' | 'off'
+  readonly baseUrl: string
+  readonly model: string
+  readonly timeoutMs: number
+}
+
 export interface MemorySettings {
   /** 默认关闭：开启后才开始记录对话，装完不会悄悄存东西。 */
   readonly enabled: boolean
@@ -145,6 +162,19 @@ export interface MemorySettings {
   readonly maxItems: number
   /** 每多少轮对话触发一次摘要压缩。 */
   readonly summarizeEvery: number
+  readonly embedding: EmbeddingSettings
+}
+
+/**
+ * 身体层：精力、困意、睡眠债、饥饿、社交能量、生理周期。
+ * 只影响她怎么说话，数值不展示给对方。
+ */
+export interface BodySettings {
+  readonly enabled: boolean
+  /** 作息窗口，跨天也认。默认 23:30–07:30。 */
+  readonly sleepWindow: { readonly start: string; readonly end: string }
+  /** 生理周期默认关：不假设，也不替对方算。lastStart 用 YYYY-MM-DD。 */
+  readonly cycle: { readonly enabled: boolean; readonly lastStart: string }
 }
 
 export interface ChatSettings {
@@ -167,25 +197,8 @@ export interface PersonaSettings {
   readonly enabled: boolean
   /** 追加在基础人格之后的风格说明，留空表示只用默认。 */
   readonly extraPrompt: string
-}
-
-/** 情绪余波：只影响表现层，不进入模型上下文。默认关闭。 */
-export interface AfterglowSettings {
-  readonly enabled: boolean
-  /** 半衰期，单位分钟，5..720。 */
-  readonly halfLifeMinutes: number
-}
-
-/** 表情表达实验：off / experiment / control 三组对照。 */
-export interface ExpressionSettings {
-  readonly group: 'off' | 'experiment' | 'control'
-}
-
-export interface EmotionSettings {
-  readonly afterglow: AfterglowSettings
-  readonly expression: ExpressionSettings
-  /** 需求状态只调整主动开口排序，默认关闭。 */
-  readonly needs: { readonly enabled: boolean }
+  /** 六段可编辑人格（身份 / 世界观 / 人生观 / 价值观 / 相处方式 / 表达风格）；空串表示跟随默认。 */
+  readonly sections: Readonly<Record<string, string>>
 }
 
 /** 一项按时刻触发的陪伴任务。 */
@@ -198,22 +211,33 @@ export interface CareSchedule {
 export interface CareSettings {
   /** 每日终盘巡视：复盘当天表现，产出次日的调整建议。 */
   readonly dailyReview: CareSchedule
-  /** 每日逐案复盘：逐条判断前一天的对话问题。 */
-  readonly caseReview: CareSchedule
-  /** 人格标准化问卷：从人格文本归纳表达风格。 */
-  readonly questionnaire: { readonly enabled: boolean }
-  /** 需求强化：按需求层级调整主动开口的排序。 */
-  readonly maslow: { readonly enabled: boolean }
-  /** 每日 token 预算上限，0 表示不限。 */
-  readonly dailyTokenBudget: number
+}
+
+/**
+ * 贴近时刻：默认关闭的情感亲密层。
+ *
+ * 打开前要在设置页二次确认；每天的次数与冷却写在代码里，这里只留开关。
+ * 群聊与 QQ 远端永远不触发，和这里的值无关。
+ */
+export interface IntimacySettings {
+  readonly enabled: boolean
+  /** 一天最多几次，默认按版本取（私人版 8、公开版 2）；设大了也只生效到 8。 */
+  readonly perDay: number
+  /** 两次之间至少隔几小时，默认 6。 */
+  readonly cooldownHours: number
+  /** 场景内多久没推进就散场，默认 6 小时。 */
+  readonly idleHours: number
+  /** 收场后余韵留多久，默认 120 分钟。 */
+  readonly aftercareMinutes: number
 }
 
 export interface CompanionSettings {
   readonly memory: MemorySettings
   readonly chat: ChatSettings
   readonly persona: PersonaSettings
-  readonly emotion: EmotionSettings
   readonly care: CareSettings
+  readonly body: BodySettings
+  readonly intimacy: IntimacySettings
 }
 
 
@@ -232,6 +256,19 @@ export interface PresenceSettings {
   readonly useWeather: boolean
   /** 夜间不扰：时段与处理方式都由使用者自己定。 */
   readonly quiet: QuietHoursSettings
+  /** 识屏：默认关，问过一次之后再打开才读。 */
+  readonly screen: ScreenReadSettings
+}
+
+/**
+ * 识屏。
+ *
+ * `consentAsked` 只记录「问过没有」，不记录答案；
+ * 答应当下 `enabled` 才为 true，拒绝就是 false，之后可由设置页重新打开。
+ */
+export interface ScreenReadSettings {
+  readonly enabled: boolean
+  readonly consentAsked: boolean
 }
 
 /**
@@ -310,6 +347,11 @@ export interface SettingsV2 {
    * 模型文件本身不进仓库也不进安装包，由使用者从作者处自行下载后导入。
    */
   readonly live2dModelId: string
+  /**
+   * 聊天唤醒词：群聊里只有叫到这些名字才当作在跟她说话。
+   * 空数组表示跟随内置默认（昔涟 / 迷迷 / 德谬歌 / 小涟），不在两处各维护一份。
+   */
+  readonly wakeWords: readonly string[]
 }
 
 export const DEFAULT_SETTINGS: SettingsV2 = {
@@ -339,7 +381,7 @@ export const DEFAULT_SETTINGS: SettingsV2 = {
     backgroundSlice: 12
   },
   icon: { tray: '', app: '' },
-  sticker: { source: '' },
+  sticker: { source: '', autoApprove: true },
   askHandling: 'pet-all',
   askEveryMinutes: 0,
   poseEverySeconds: 60,
@@ -364,9 +406,17 @@ export const DEFAULT_SETTINGS: SettingsV2 = {
     minIntervalSeconds: 8
   },
   locale: 'zh-CN',
+  // 空表示用内置唤醒词，避免默认值散落在 shared 与 electron 两处。
+  wakeWords: [],
   companion: {
     // 记忆、聊天都默认关：不填 Key 不出网，不主动记录。
-    memory: { enabled: false, maxItems: 500, summarizeEvery: 8 },
+    memory: {
+      enabled: false,
+      maxItems: 500,
+      summarizeEvery: 8,
+      // auto：填了地址走 OpenAI 兼容，没填探本地 Ollama，都不通就纯 BM25。
+      embedding: { provider: 'auto', baseUrl: '', model: '', timeoutMs: 1_500 }
+    },
     chat: {
       enabled: false,
       provider: 'deepseek',
@@ -375,31 +425,31 @@ export const DEFAULT_SETTINGS: SettingsV2 = {
       temperature: 0.8,
       historyLimit: 10
     },
-    persona: { enabled: true, extraPrompt: '' },
-    emotion: {
-      // 余波与需求都是表现层近似：默认关，开了也只影响本机表现。
-      afterglow: { enabled: false, halfLifeMinutes: 30 },
-      expression: { group: 'off' },
-      needs: { enabled: false }
-    },
+    persona: { enabled: true, extraPrompt: '', sections: {} },
     care: {
-      // 陪伴任务全部默认关，开启后会按 dailyTokenBudget 限流。
-      dailyReview: { enabled: false, at: '22:30' },
-      caseReview: { enabled: false, at: '23:00' },
-      questionnaire: { enabled: false },
-      maslow: { enabled: false },
-      dailyTokenBudget: 20_000
-    }
+      // 陪伴任务默认关。
+      dailyReview: { enabled: false, at: '22:30' }
+    },
+    // 身体层默认开：只影响语气，不向外暴露数值。
+    body: {
+      enabled: true,
+      sleepWindow: { start: '23:30', end: '07:30' },
+      cycle: { enabled: false, lastStart: '' }
+    },
+    // 贴近时刻默认关：打开了也只在桌面本机、有由头的时候偶尔出现。
+    intimacy: { enabled: false, perDay: 2, cooldownHours: 6, idleHours: 6, aftercareMinutes: 120 }
   },
   presence: {
     // 关着时不请求天气、不请求模型，气泡只用本地台词池。
     aiEnabled: false,
-    intervalMinutes: 12,
+    intervalMinutes: 45,
     // 留空 = 用 presence.mjs 里的默认城市，不在配置里替使用者选地方。
     city: '',
     useWeather: true,
-    // 默认关闭；打开后默认 23:00–08:00 只关搭话、保留定时提醒。
-    quiet: { enabled: false, from: '23:00', to: '08:00', mode: 'urgentOnly', hideHud: false }
+    // 默认开启：23:00–08:00 只关搭话、保留定时提醒。
+    quiet: { enabled: true, from: '23:00', to: '08:00', mode: 'urgentOnly', hideHud: false },
+    // 识屏默认关：没问过也不读，拒绝过一次也不会偷偷打开。
+    screen: { enabled: false, consentAsked: false }
   },
   // 余额监控默认关；参数先给保守值，打开模块后才生效。
   balance: { threshold: 20, intervalMinutes: 30 },
@@ -418,7 +468,8 @@ export const DEFAULT_SETTINGS: SettingsV2 = {
       ownerOpenIds: [],
       targetOpenId: '',
       publicKey: '',
-      webhookPort: 8787
+      webhookPort: 8787,
+      imitateFormat: true
     }
   },
   // 默认樱粉：这是昔涟自己的色调，也是新安装第一眼看到的配色。

@@ -9,9 +9,15 @@ export const IPC_CHANNELS = [
   'pet:settings:save',
   'pet:settings:open',
   'pet:settings:close',
+  'pet:settings:minimize',
+  'pet:settings:toggleMaximize',
+  // 恢复出厂：写默认设置、清记忆与聊天记录、移除服务密钥，然后重启回引导页。
+  'pet:factory:reset',
   'pet:qq:test',
   // QQ 运行状态：连接态、待发队列与 webhook 监听结果，只读。
   'pet:qq:status',
+  // 一键绑定：把最近一条入站消息的发送者写进主人名单，会落盘并重建通道。
+  'pet:qq:bind-owner',
   'pet:window:setClickThrough',
   'pet:window:setAlwaysOnTop',
   'pet:window:move',
@@ -56,13 +62,23 @@ export const IPC_CHANNELS = [
   'pet:chat:export',
   'pet:chat:open',
   'pet:chat:close',
+  // 拍照：拍的是她自己，只回文件路径，不把图像数据搬进渲染层。
+  'pet:photo:take',
   'pet:memory:stats',
+  'pet:memory:facts',
+  'pet:memory:facts:remove',
+  'pet:memory:facts:update',
+  // 她记住的事整份备份：JSONL 一行一条，导出后可原样导入。
+  'pet:memory:facts:export',
+  'pet:memory:facts:import',
   'pet:memory:list',
   'pet:memory:delete',
   'pet:memory:export',
   'pet:memory:clear',
   // 启动前体检：模型 / 密钥 / 语音配置 / 磁盘 / Vault，一次汇总。
   'pet:preflight',
+  // 运行状态四卡片：QQ / 记忆条数 / 今天主动次数 / 上次反思，只读。
+  'pet:status:summary',
   // 每日巡视与反思：手动触发一次日报 / 生成三行反思。
   'pet:daily:run',
   'pet:daily:last',
@@ -77,6 +93,22 @@ export const IPC_CHANNELS = [
   'pet:game:schedule:get',
   'pet:game:schedule:save',
   'pet:game:dry-run',
+  // 多游戏日常：state 读写、计划预览、注册/删除计划任务、运行记录。
+  'pet:game:daily:state',
+  'pet:game:daily:update',
+  'pet:game:daily:plan',
+  'pet:game:daily:apply',
+  'pet:game:daily:query',
+  'pet:game:daily:disable',
+  'pet:game:daily:runs',
+  // 游戏助手：默认关闭；连续两次风险确认后才允许生成任务计划。
+  'pet:game:assistant:status',
+  'pet:game:assistant:confirm',
+  'pet:game:assistant:disable',
+  'pet:game:assistant:record',
+  'pet:game:assistant:claim',
+  'pet:game:assistant:rank',
+  'pet:game:assistant:plan',
   // 随包素材清单（表情 / 立绘），只回相对路径与 pet-media 地址。
   'pet:assets:list',
   // 素材包：用户导入的字体 / 图标 / 气泡 / 表情，存 userData/packs。
@@ -84,13 +116,36 @@ export const IPC_CHANNELS = [
   'pet:packs:import',
   'pet:packs:remove',
   'pet:packs:setEnabled',
+  // 表情包：QQ 偷来的图先进待审核队列，入库 / 丢弃只能由用户点。
+  'pet:sticker:inbox',
+  'pet:sticker:library',
+  'pet:sticker:approve',
+  'pet:sticker:reject',
+  'pet:sticker:open',
+  'pet:sticker:send',
   'pet:persona:preview',
   // 桌面状态条的系统指标：只读快照，主进程按固定间隔采样后推送。
   'pet:system:stats',
   // 心情快照：按当前时间与会话时长算，只回标签与等级。
   'pet:presence:mood',
+  // 今天的节目单：只读「现在 / 接下来」，以及手动顺延这一个写动作。
+  'pet:companion:agenda',
+  'pet:companion:agenda:reschedule',
+  // 观察台：整份只读快照，外加三个只落在单个会话上的手动动作。
+  'pet:insight:open',
+  'pet:insight:snapshot',
+  'pet:insight:set-favor',
+  'pet:insight:adjust-favor',
+  'pet:insight:lock-favor',
+  'pet:insight:reset-scope',
+  'pet:insight:delete-memory',
   // 参考音频：只弹系统选择框挑本机音频，回绝对路径；不读文件内容。
   'pet:voice:pickRefAudio',
+  // 语音唤醒：运行时按需下载（默认关闭）。只装/卸/开关/看状态，不搬运音频。
+  'pet:wake:status',
+  'pet:wake:install',
+  'pet:wake:remove',
+  'pet:wake:setEnabled',
   // 连接自检：用已存的 Key 发一次最小请求，只回状态与耗时，不回密钥。
   'pet:llm:test',
   // 设置同步：导出快照 / 应用对端变更，只在本机同步目录里搬运。

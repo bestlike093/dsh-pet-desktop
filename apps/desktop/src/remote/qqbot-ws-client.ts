@@ -21,6 +21,9 @@ export type QqBotEventType =
   | 'C2C_MESSAGE_CREATE'
   | 'GROUP_AT_MESSAGE_CREATE'
   | 'GROUP_MESSAGE_CREATE'
+  /** 机器人被拉进群 / 被移出群：只用来解释「群里为什么突然收不到消息」。 */
+  | 'GROUP_ADD_ROBOT'
+  | 'GROUP_DEL_ROBOT'
   | 'READY'
   | 'RESUMED'
 
@@ -63,7 +66,14 @@ export class QqBotWsClient {
   private ready = false
   private backoffMs = 1_000
   private heartbeatAcked = true
+  /** 连续多少个心跳周期没有 ACK；容忍一次网络抖动，连续两次才判定假死。 */
+  private heartbeatMisses = 0
   private lastError: Error | null = null
+  /**
+   * 每次 connect 递增。旧 socket 的 close/error 回调晚到时，
+   * 只能处理自己那一代，不能把新连接的心跳和重连计划一起清掉。
+   */
+  private generation = 0
 
   constructor(private readonly options: QqBotWsClientOptions) {}
 
@@ -82,6 +92,8 @@ export class QqBotWsClient {
 
   async stop(): Promise<void> {
     this.stopped = true
+    // 让所有在途连接的回调失效，避免关闭后又被旧 close 拉起重连。
+    this.generation += 1
     this.clearTimers()
     const ws = this.ws
     this.ws = null
@@ -98,23 +110,30 @@ export class QqBotWsClient {
 
   private async connect(resume: boolean): Promise<void> {
     if (this.stopped) return
+    // 取 token 是异步的；期间可能又来了新的 connect。用代次把旧的那次作废。
+    const generation = ++this.generation
     let token: string
     try {
       token = await this.options.getAccessToken()
     } catch (error) {
+      if (generation !== this.generation) return
       const err = error instanceof Error ? error : new Error(String(error))
       this.lastError = err
       this.options.onError(err)
       this.scheduleReconnect()
       return
     }
+    if (this.stopped || generation !== this.generation) return
+
     const ws = this.options.websocketFactory
       ? this.options.websocketFactory(this.options.gatewayUrl)
       : new WebSocketClient(this.options.gatewayUrl)
     this.ws = ws
     this.heartbeatAcked = true
+    this.heartbeatMisses = 0
 
     ws.on('message', (raw: unknown) => {
+      if (generation !== this.generation) return
       try {
         this.handlePayload(JSON.parse(String(raw)) as WsPayload, token, resume)
       } catch (error) {
@@ -122,10 +141,13 @@ export class QqBotWsClient {
       }
     })
     ws.on('error', (error: Error) => {
+      if (generation !== this.generation) return
       this.lastError = error
       this.options.onError(error)
     })
     ws.on('close', () => {
+      // 旧连接的 close 不能清掉新连接的心跳，也不能再排一次重连。
+      if (generation !== this.generation) return
       this.clearHeartbeat()
       if (this.stopped) return
       // close 后统一走重连；是否可 Resume 由 connect 内决定
@@ -172,6 +194,7 @@ export class QqBotWsClient {
       case 11:
         // Heartbeat ACK
         this.heartbeatAcked = true
+        this.heartbeatMisses = 0
         break
       case 7:
         // 服务端要求重连：优先 Resume
@@ -184,12 +207,13 @@ export class QqBotWsClient {
         }
         break
       case 9: {
-        // Invalid Session：重新 Identify（丢弃旧 session）
-        this.sessionId = ''
-        this.seq = 0
-        setTimeout(() => {
-          if (!this.stopped) this.sendIdentify(token)
-        }, 3_000)
+        // Invalid Session：旧 token/session 已经不可用。重新取 token、关掉旧 socket 再 Identify，
+        // 原来直接在旧 socket 上补发 Identify，token 过期时会无限循环断开。
+        const invalidResumable = (payload.d as { d?: unknown } | null)?.d
+        this.lastError = new Error(
+          `QQ Bot session 无效（${invalidResumable === true ? '可重试' : '需重新鉴权'}），正在重建连接`
+        )
+        this.restart()
         break
       }
       default:
@@ -209,19 +233,54 @@ export class QqBotWsClient {
     })
   }
 
+  /**
+   * 放弃当前 socket，重新取 token 再连。
+   *
+   * op 9（Invalid Session）和 token 过期都需要这条路径：旧 socket 上补发 Identify
+   * 只会拿同一个失效 token 再被拒一次，表现为「刚连上就断」的循环。
+   */
+  private restart(): void {
+    this.clearHeartbeat()
+    this.sessionId = ''
+    this.seq = 0
+    this.backoffMs = 1_000
+    const ws = this.ws
+    this.ws = null
+    // 先把代次推上去，旧 socket 的 close 回调就不会再排重连。
+    this.generation += 1
+    if (ws !== null) {
+      ws.removeAllListeners()
+      try {
+        ws.close(4000, 'invalid session')
+      } catch {
+        // 已断开时 close 会抛错，忽略
+      }
+    }
+    this.setReady(false)
+    if (this.stopped) return
+    void this.connect(false)
+  }
+
   private startHeartbeat(intervalMs: number): void {
     this.clearHeartbeat()
     this.heartbeatAcked = true
+    this.heartbeatMisses = 0
     this.heartbeatTimer = setInterval(() => {
       if (!this.heartbeatAcked) {
-        // 两次心跳没 ACK：连接假死，强制断开触发重连
-        this.options.onError(new Error('QQ Bot 心跳超时，重连'))
-        try {
-          this.ws?.terminate()
-        } catch {
-          // 忽略
+        this.heartbeatMisses += 1
+        // 连续两个周期没有 ACK 才判定假死：官方心跳间隔本身就有 40s 左右，
+        // 一次网络抖动就断开会让「反复重连」变成常态。
+        if (this.heartbeatMisses >= 2) {
+          this.options.onError(new Error('QQ Bot 心跳超时，重连'))
+          try {
+            this.ws?.terminate()
+          } catch {
+            // 忽略
+          }
+          return
         }
-        return
+      } else {
+        this.heartbeatMisses = 0
       }
       this.heartbeatAcked = false
       this.send({ op: 1, d: this.seq > 0 ? this.seq : null })

@@ -17,6 +17,14 @@
 const CHAT_ENDPOINT = 'https://api.deepseek.com/chat/completions'
 const WEATHER_ENDPOINT = 'https://api.open-meteo.com/v1/forecast'
 
+import { parseEmojiTag } from './companion.mjs'
+import { pickWeatherAlert, describeWeatherAlert } from './weather-alert.mjs'
+import {
+  buildLifestyle,
+  describeLifestyle,
+  localDateKey
+} from '../../../packages/core/dist/browser.js'
+
 /** 说的这一句最长多少字。气泡窄，超过就要换行了。 */
 export const MAX_LINE_CHARS = 40
 
@@ -143,14 +151,15 @@ export function weatherCodeToText(code) {
  * 不重试、不缓存失败结果。
  */
 export async function fetchWeather(options) {
-  const { city = DEFAULT_CITY, fetchImpl = globalThis.fetch, timeoutMs = 4000 } = options ?? {}
+  const { city = DEFAULT_CITY, fetchImpl = globalThis.fetch, timeoutMs = 4000, now = null } = options ?? {}
   const name = String(city ?? '').trim() || DEFAULT_CITY
   const coords = CITY_COORDS[name] ?? CITY_COORDS[DEFAULT_CITY]
   const resolved = CITY_COORDS[name] === undefined ? DEFAULT_CITY : name
 
   const url =
     `${WEATHER_ENDPOINT}?latitude=${coords.latitude}&longitude=${coords.longitude}` +
-    '&current=temperature_2m,weather_code&timezone=Asia%2FShanghai'
+    '&current=temperature_2m,apparent_temperature,weather_code&timezone=Asia%2FShanghai' +
+    '&hourly=precipitation,weather_code,wind_speed_10m,temperature_2m,snowfall&forecast_days=2'
 
   const controller = typeof AbortController === 'function' ? new AbortController() : null
   const timer = controller === null ? null : setTimeout(() => controller.abort(), timeoutMs)
@@ -160,15 +169,23 @@ export async function fetchWeather(options) {
     const body = await response.json()
     const current = body?.current ?? {}
     const temp = Number(current.temperature_2m)
+    const feels = Number(current.apparent_temperature)
     const code = Number(current.weather_code)
     if (!Number.isFinite(temp)) return { ok: false, reason: 'bad-payload' }
+    // 提醒只从逐小时预报里算，缺 hourly 就只是没有提醒，不影响当前天气。
+    const anchor = now instanceof Date ? now : new Date()
+    const alert = pickWeatherAlert(body?.hourly, { now: anchor })
     return {
       ok: true,
       city: resolved,
       requested: name,
       temperature: Math.round(temp),
+      // 体感温度缺失时退回实际温度；两个都没有就不会走到这里。
+      feelsLike: Math.round(Number.isFinite(feels) ? feels : temp),
       text: weatherCodeToText(code),
-      code: Number.isFinite(code) ? code : null
+      code: Number.isFinite(code) ? code : null,
+      alert,
+      alertNote: alert === null ? '' : describeWeatherAlert(alert, anchor)
     }
   } catch (error) {
     return { ok: false, reason: error?.name === 'AbortError' ? 'timeout' : 'network' }
@@ -184,7 +201,7 @@ export async function fetchWeather(options) {
  * 这里明确「一句话、不用引号、不解释、不列举」。
  */
 export function buildBubblePrompt(context) {
-  const { nickname = '', personaText = '', timeCtx, weather = null, mood = null, memoryDigest = '', recentLines = [], motions = null } = context ?? {}
+  const { nickname = '', personaText = '', timeCtx, weather = null, weatherAlertNote = '', mood = null, memoryDigest = '', recentLines = [], motions = null, companionNote = '', emojiCandidates = [], focusText = '', bodyNote = '', lifestyleNote = '', environmentNote = '', anniversaryNote = '', screenNote = '' } = context ?? {}
   const who = nickname.trim() === '' ? '对方' : nickname.trim()
 
   const facts = [
@@ -192,6 +209,16 @@ export function buildBubblePrompt(context) {
   ]
   if (weather !== null && weather.ok === true) {
     facts.push(`外面${weather.city}${weather.text}，${weather.temperature}℃。`)
+  }
+  // 预警只报一条，而且是「预报里看着像」的口气，不冒充气象台。
+  const alertNote = typeof weatherAlertNote === 'string' ? weatherAlertNote.trim() : ''
+  if (alertNote !== '') {
+    facts.push(`预报里提到：${alertNote.endsWith('。') ? alertNote : `${alertNote}。`}可以说一句提醒，但别念成播报。`)
+  }
+  // 节日与穿搭来自 core 的纯逻辑；没有温度就没有穿搭，没有节日就没有节日句。
+  const lifestyle = typeof lifestyleNote === 'string' ? lifestyleNote.trim() : ''
+  if (lifestyle !== '') {
+    facts.push(lifestyle.endsWith('。') ? lifestyle : `${lifestyle}。`)
   }
   if (mood !== null) {
     facts.push(`你此刻的状态：${mood.label}。`)
@@ -201,6 +228,29 @@ export function buildBubblePrompt(context) {
   }
   if (recentLines.length > 0) {
     facts.push(`最近说过的话，别重复：${recentLines.join(' / ')}`)
+  }
+  // 有话头到点时，只把这一条递到眼前；其他没聊完的事仍然留在陪伴层里。
+  const focus = typeof focusText === 'string' ? focusText.trim() : ''
+  if (focus !== '') {
+    facts.push(`上次有件事还没说完：${focus}。可以顺着它轻轻问一句，别追问。`)
+  }
+  // 陪伴层带来的是「此刻的自己」：真实心情与还没聊完的事。
+  // 它是多行的，单独成段，避免和其他单句事实混在一起读成一条。
+  const companion = typeof companionNote === 'string' ? companionNote.trim() : ''
+  if (companion !== '') facts.push(companion)
+  // 身体感觉只给一句，不报数值；累的时候说话自然短一点。
+  const body = typeof bodyNote === 'string' ? bodyNote.trim() : ''
+  if (body !== '') facts.push(`你此刻的身体感觉：${body}。`)
+  // 余额与电脑状态：只在她真的注意到时才提，不每句都念。
+  const environment = typeof environmentNote === 'string' ? environmentNote.trim() : ''
+  if (environment !== '') facts.push(`你顺手看到的事：${environment}`)
+  // 纪念日只在临近时出现，而且必须有原话作证。
+  const anniversary = typeof anniversaryNote === 'string' ? anniversaryNote.trim() : ''
+  if (anniversary !== '') facts.push(`你记得的日子：${anniversary}`)
+  // 识屏只给读到的字；说到哪算哪，不要假装看见了画面。
+  const screen = typeof screenNote === 'string' ? screenNote.trim() : ''
+  if (screen !== '') {
+    facts.push(`你刚瞥了一眼屏幕，上面有这些字：${screen}。只是瞥见，别逐条念，也别猜图里有什么。`)
   }
   // 动作清单来自渲染层真实探测：探测不到能力就不给清单，模型也就无从瞎点。
   const motionList = describeMotions(motions)
@@ -214,7 +264,7 @@ export function buildBubblePrompt(context) {
       : '你是一个安静、温柔的桌面伙伴。',
     '',
     '现在你要主动说一句很短的话，像坐在旁边随口说的，不是回答问题。',
-    `要求：只输出一句话，不超过 ${MAX_LINE_CHARS} 个字；不要引号、不要括号、不要 emoji；`,
+    `要求：只输出一句话，不超过 ${MAX_LINE_CHARS} 个字；不要引号、不要括号、不要直接打 emoji 字符；`,
     '不要解释你在做什么，不要列点，不要问候模板，不要提到「根据时间」「根据天气」这类分析口吻。',
     '如果没什么可说的，就写一句安静的陪伴感，不要硬凑信息。',
     ...(motionList === ''
@@ -224,7 +274,15 @@ export function buildBubblePrompt(context) {
           '你可以在句子最后单独加一个动作标记来控制自己的身体，格式必须是 [动作:名称]，',
           '名称只能从上面「你此刻能做的动作」里挑一个；这句话配不上动作就什么标记都不要加。',
           '标记不算进字数，也不要写在引号里，不要解释它。'
-        ])
+        ]),
+    ...(Array.isArray(emojiCandidates) && emojiCandidates.length > 0
+      ? [
+          '',
+          '也可以配一张小表情，在整句最后单独写 [图:id]。id 只能从这些里面挑：',
+          emojiCandidates.join('、'),
+          '配不上就不写，不要用别的写法，也不要解释这个标记。'
+        ]
+      : [])
   ].join('\n')
 
   const user = [`对方叫${who}。`, ...facts].join('\n')
@@ -335,48 +393,78 @@ export function fallbackLine(timeCtx, mood) {
   return pool[Math.floor(Math.random() * pool.length)]
 }
 
-/** 调一次模型。返回 { ok, line } 或 { ok: false, reason }，不抛错。 */
+/**
+ * 调一次模型。返回 { ok, line } 或 { ok: false, reason }，不抛错。
+ *
+ * 空的 content 在两种情况下都会出现：推理模型把预算烧在 reasoning_content 上，
+ * 或者模型只回了一个动作/表情标记。80 tokens 对前者太紧，`empty` 会反复刷日志，
+ * 所以这里给足预算，并在空结果时换低一点的温度再问一次。
+ */
 async function requestLine(options) {
   const {
     apiKey,
     model = 'deepseek-chat',
     prompt,
+    // 这一轮允许的图 id；不在列表里的标记会被丢掉，避免模型编一个不存在的文件。
+    allowedEmoji = null,
     fetchImpl = globalThis.fetch,
     timeoutMs = 20_000
   } = options
 
-  const controller = typeof AbortController === 'function' ? new AbortController() : null
-  const timer = controller === null ? null : setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    const response = await fetchImpl(CHAT_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: prompt.system },
-          { role: 'user', content: prompt.user }
-        ],
-        max_tokens: 80,
-        temperature: 1.05
-      }),
-      ...(controller === null ? {} : { signal: controller.signal })
-    })
-    if (!response.ok) return { ok: false, reason: `http-${response.status}` }
-    const body = await response.json()
-    // 先摘动作标记再清洗：清洗只留第一个句号前的内容，标记留在句末会被一起砍掉。
-    const tagged = parseMotionTag(body?.choices?.[0]?.message?.content ?? '')
-    const line = cleanBubbleLine(tagged.text)
-    if (line === null) return { ok: false, reason: 'empty' }
-    return { ok: true, line, motion: tagged.motion }
-  } catch (error) {
-    return { ok: false, reason: error?.name === 'AbortError' ? 'timeout' : 'network' }
-  } finally {
-    if (timer !== null) clearTimeout(timer)
+  async function requestOnce(temperature, extraHint) {
+    const controller = typeof AbortController === 'function' ? new AbortController() : null
+    const timer = controller === null ? null : setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const response = await fetchImpl(CHAT_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: prompt.system },
+            { role: 'user', content: extraHint === '' ? prompt.user : `${prompt.user}\n${extraHint}` }
+          ],
+          // 只用来挡住「只回一个标记」；推理模型的 reasoning 也占预算，80 会把它耗空。
+          max_tokens: 320,
+          temperature
+        }),
+        ...(controller === null ? {} : { signal: controller.signal })
+      })
+      if (!response.ok) return { ok: false, reason: `http-${response.status}` }
+      const body = await response.json()
+      const message = body?.choices?.[0]?.message ?? {}
+      const content = typeof message.content === 'string' ? message.content : ''
+      // 先摘表情标记，再摘动作标记，最后清洗：两个标记都可能在句末，
+      // 而 cleanBubbleLine 只保留第一句话，晚一步就再也取不到了。
+      const pictured = parseEmojiTag(content, allowedEmoji)
+      const tagged = parseMotionTag(pictured.text)
+      const line = cleanBubbleLine(tagged.text)
+      if (line === null) {
+        return {
+          ok: false,
+          reason: 'empty',
+          // 诊断用：只记长度与结束原因，不把模型原文写进日志。
+          detail: `len=${content.length} finish=${String(body?.choices?.[0]?.finish_reason ?? '')}`
+        }
+      }
+      return { ok: true, line, motion: tagged.motion, emojiId: pictured.emojiId }
+    } catch (error) {
+      return { ok: false, reason: error?.name === 'AbortError' ? 'timeout' : 'network' }
+    } finally {
+      if (timer !== null) clearTimeout(timer)
+    }
   }
+
+  const first = await requestOnce(1.05, '')
+  if (first.ok === true) return first
+  // 网络/超时/HTTP 错误重试没有意义；只对「模型回了个空」再给一次机会。
+  if (first.reason !== 'empty') return first
+  const second = await requestOnce(0.85, '直接说一句 40 字以内的话，不要只写动作或表情标记。')
+  if (second.ok === true) return second
+  return { ...second, detail: second.detail ?? first.detail }
 }
 
 /**
@@ -393,6 +481,16 @@ export function createPresenceService(options) {
     getPersonaText,
     // 渲染层上报的动作能力；主进程不传就等于「没有动作可点」，提示词里也不会出现清单。
     getMotionCatalog = null,
+    // 陪伴层：可选。没注入时主动说话仍按时间与陪伴推导的轻量心情走。
+    getCompanion = null,
+    // 身体层：可选。只给一句体感，不传就少一段，不影响这句话本身。
+    getBodyNote = null,
+    // 余额 / 电脑状态：可选。拿不到或采样过期就当作没看见。
+    getEnvironmentNote = null,
+    // 纪念日：可选。只从有原话作证、且就在这几天的记录里来。
+    getAnniversaryNote = null,
+    // 识屏：可选。没打开或读不到就当作没看见。
+    getScreenNote = null,
     fetchImpl = globalThis.fetch,
     log = () => {},
     now = () => new Date()
@@ -416,6 +514,28 @@ export function createPresenceService(options) {
     return value
   }
 
+  /**
+   * 今天是什么日子、外面该穿什么。
+   *
+   * 节日不依赖天气；天气拿不到时只缺穿搭，不会把节日一起吞掉。
+   * 关掉天气开关时同样保留节日。
+   */
+  async function currentLifestyle() {
+    const settings = readSettings()
+    const weather = settings?.presence?.useWeather === false ? null : await currentWeather()
+    const feelsLike =
+      weather !== null && weather.ok === true
+        ? typeof weather.feelsLike === 'number'
+          ? weather.feelsLike
+          : weather.temperature
+        : null
+    return buildLifestyle({ dateKey: localDateKey(now()), feelsLike })
+  }
+
+  async function currentLifestyleNote() {
+    return describeLifestyle(await currentLifestyle())
+  }
+
   /** 记录一次互动，供心情与「别重复」使用。 */
   function noteContact(at = now()) {
     lastContactAt = at
@@ -433,7 +553,7 @@ export function createPresenceService(options) {
    * reason：auto 定时开口 / manual 被点 / wake 窗口重新出现。
    * 无论哪条路径，返回的都是可以直接塞进气泡的一句话。
    */
-  async function nextLine(reason = 'auto') {
+  async function nextLine(reason = 'auto', focusText = '') {
     const settings = readSettings()
     const timeCtx = timeContext(now())
     const mood = moodSnapshot({
@@ -444,16 +564,41 @@ export function createPresenceService(options) {
     })
 
     const weather = settings?.presence?.useWeather === false ? null : await currentWeather()
+    const lifestyle = await currentLifestyle()
+
+    // 陪伴层给的是「跨对话一直在的自己」：真实心情、没聊完的话头、能配哪几张图。
+    // 任何一项拿不到都只是少一段，不影响这句话本身。
+    const companion = typeof getCompanion === 'function' ? getCompanion() : null
+    const companionNote =
+      companion !== null && typeof companion?.presenceNote === 'function'
+        ? (await companion.presenceNote()) ?? ''
+        : ''
+    const emojiCandidates =
+      companion !== null && typeof companion?.emojiCandidates === 'function'
+        ? ((await companion.emojiCandidates(3)) ?? [])
+        : []
+
     const prompt = buildBubblePrompt({
       nickname: settings?.nickname ?? '',
       personaText: typeof getPersonaText === 'function' ? getPersonaText(settings) : '',
       timeCtx,
       weather,
+      weatherAlertNote: weather?.alertNote ?? '',
       mood,
       memoryDigest: typeof getMemoryDigest === 'function' ? getMemoryDigest() ?? '' : '',
       recentLines,
       // 渲染层探测到的真实动作能力；探测不到就是 null，模型那边不会出现动作清单。
-      motions: typeof getMotionCatalog === 'function' ? getMotionCatalog() ?? null : null
+      motions: typeof getMotionCatalog === 'function' ? getMotionCatalog() ?? null : null,
+      companionNote,
+      emojiCandidates,
+      focusText,
+      bodyNote: typeof getBodyNote === 'function' ? (await getBodyNote()) ?? '' : '',
+      lifestyleNote: describeLifestyle(lifestyle),
+      environmentNote:
+        typeof getEnvironmentNote === 'function' ? (await getEnvironmentNote()) ?? '' : '',
+      anniversaryNote:
+        typeof getAnniversaryNote === 'function' ? (await getAnniversaryNote()) ?? '' : '',
+      screenNote: typeof getScreenNote === 'function' ? (await getScreenNote()) ?? '' : ''
     })
 
     let apiKey = ''
@@ -473,6 +618,7 @@ export function createPresenceService(options) {
       apiKey,
       model: settings?.companion?.chat?.model ?? 'deepseek-chat',
       prompt,
+      allowedEmoji: emojiCandidates,
       fetchImpl
     })
     if (result.ok === false) {
@@ -488,6 +634,8 @@ export function createPresenceService(options) {
       line: result.line,
       // AI 自己挑的动作；没挑就是 null，渲染层退回按心情驱动。
       motion: typeof result.motion === 'string' && result.motion !== '' ? result.motion : null,
+      // AI 自己挑的表情 id；渲染层换成素材地址贴在气泡里，null 表示这句不配图。
+      emojiId: typeof result.emojiId === 'string' && result.emojiId !== '' ? result.emojiId : null,
       source: 'model',
       timeCtx,
       mood,
@@ -519,10 +667,19 @@ export function createPresenceService(options) {
       time: timeCtx,
       mood,
       weather,
+      lifestyle: await currentLifestyle(),
       sessionMinutes: Math.max(0, Math.round((now().getTime() - sessionStartedAt.getTime()) / 60000)),
       recentLines: [...recentLines]
     }
   }
 
-  return { nextLine, noteContact, noteSpoken, peekContext, currentMood }
+  return {
+    nextLine,
+    noteContact,
+    noteSpoken,
+    peekContext,
+    currentMood,
+    currentLifestyle,
+    currentLifestyleNote
+  }
 }

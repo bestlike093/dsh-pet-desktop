@@ -18,6 +18,7 @@ const deps = {
   getLastRenderInfo: () => null,
   modelStore: { list: async () => [], root: '', toMediaUrl: () => '' },
   packStore: { list: async () => [] },
+  stickerInbox: { list: async () => [] },
   assetLibrary: { list: async () => ({ ok: true, groups: [], total: 0 }) },
   systemStats: { snapshot: () => ({}) },
   presenceService: { currentMood: () => ({}) },

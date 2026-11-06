@@ -18,23 +18,6 @@ function t(key) {
   return window.PetI18n?.t(key, locale) ?? key
 }
 
-/** 导入失败的结构化原因码 → 文案；认不出的 code 回落到主进程原文。 */
-const PACK_IMPORT_REASONS = {
-  INPUT_MISSING: 'packs.reasonInputMissing',
-  PATH_UNSAFE: 'packs.reasonPathUnsafe',
-  MODEL_FILE: 'packs.reasonModelFile',
-  FILE_TOO_LARGE: 'packs.reasonFileTooLarge',
-  TOTAL_TOO_LARGE: 'packs.reasonTotalTooLarge',
-  NO_RECOGNIZED: 'packs.reasonNoRecognized',
-  EMPTY_AFTER_IMPORT: 'packs.reasonEmpty',
-  MANIFEST_INVALID: 'packs.reasonManifest'
-}
-
-function packImportReason(code) {
-  const key = PACK_IMPORT_REASONS[code]
-  return key === undefined ? '' : t(key)
-}
-
 /**
  * 统一确认入口。normal 说明后果即可；danger 要求输入确认词。
  * 调用点集中在这里，之后换成自绘对话框时不用逐处改。
@@ -49,17 +32,35 @@ function applyI18n(locale) {
   window.PetI18n?.apply(locale)
 }
 
+/**
+ * 唤醒词输入：顿号、逗号、分号、空白都当分隔符。
+ * 清洗规则与主进程迁移保持一致（最多 8 个、每个 16 字、去重），
+ * 避免界面上能填进去、保存时又被悄悄截断。
+ */
+function parseWakeWords(text) {
+  const seen = new Set()
+  const words = []
+  for (const raw of String(text ?? '').split(/[、,，;；\s]+/)) {
+    const word = raw.trim().slice(0, 16)
+    if (word === '' || seen.has(word)) continue
+    seen.add(word)
+    words.push(word)
+    if (words.length >= 8) break
+  }
+  return words
+}
+
 const THEME_SHORT = { OceanBlue: 'blue', SakuraPink: 'pink', Paper: 'ink' }
 
 // 一级导航只负责分组，真正的面板仍由 data-panel 决定。
 // 旧深链（chat / voice / status …）全部保留，showPanel 负责把一级与子标签一起点亮。
 const PANEL_GROUPS = {
-  general: { labelKey: 'nav.general', panels: ['general', 'persona', 'language'] },
-  dialogue: { labelKey: 'nav.dialogue', panels: ['chat', 'voice'] },
-  companion: { labelKey: 'nav.companion', panels: ['companion'] },
+  overview: { labelKey: 'nav.overview', panels: ['overview'] },
+  self: { labelKey: 'nav.self', panels: ['general', 'hud'] },
+  talk: { labelKey: 'nav.talk', panels: ['connection', 'voice'] },
+  company: { labelKey: 'nav.company', panels: ['proactive', 'routine'] },
   memory: { labelKey: 'nav.memory', panels: ['memory'] },
-  ability: { labelKey: 'nav.ability', panels: ['ability', 'connection'] },
-  system: { labelKey: 'nav.system', panels: ['data', 'status'] }
+  more: { labelKey: 'nav.more', panels: ['ability', 'account', 'data'] }
 }
 
 const PANEL_TO_GROUP = Object.fromEntries(
@@ -67,20 +68,32 @@ const PANEL_TO_GROUP = Object.fromEntries(
 )
 
 const PANEL_META = {
+  overview: { titleKey: 'panel.overview', descKey: 'page.overview.desc' },
   general: { titleKey: 'panel.general', descKey: 'page.general.desc' },
-  persona: { titleKey: 'panel.persona', descKey: 'page.persona.desc' },
-  language: { titleKey: 'panel.language', descKey: 'page.language.desc' },
-  chat: { titleKey: 'panel.chat', descKey: 'page.chat.desc' },
+  hud: { titleKey: 'panel.hud', descKey: 'page.hud.desc' },
+  connection: { titleKey: 'panel.connection', descKey: 'page.connection.desc' },
   voice: { titleKey: 'panel.voice', descKey: 'page.voice.desc' },
-  companion: { titleKey: 'panel.companion', descKey: 'page.companion.desc' },
+  proactive: { titleKey: 'panel.proactive', descKey: 'page.proactive.desc' },
+  routine: { titleKey: 'panel.routine', descKey: 'page.routine.desc' },
   memory: { titleKey: 'panel.memory', descKey: 'page.memory.desc' },
   ability: { titleKey: 'panel.ability', descKey: 'page.ability.desc' },
-  connection: { titleKey: 'panel.connection', descKey: 'page.connection.desc' },
-  data: { titleKey: 'panel.data', descKey: 'page.data.desc' },
-  status: { titleKey: 'panel.status', descKey: 'page.status.desc' }
+  account: { titleKey: 'panel.account', descKey: 'page.account.desc' },
+  data: { titleKey: 'panel.data', descKey: 'page.data.desc' }
 }
 
-let activePanel = 'general'
+// 旧深链与旧记忆里的面板名仍要能落地；页面合并后旧名字统一指到新页面。
+const LEGACY_PANELS = {
+  companion: 'proactive',
+  persona: 'general',
+  language: 'voice',
+  chat: 'connection',
+  life: 'routine',
+  mood: 'routine',
+  game: 'ability',
+  status: 'data'
+}
+
+let activePanel = 'overview'
 const lastPanelByGroup = {}
 
 // 与 packages/shared/src/types/model.ts 的 SIZE_PROFILES 保持一致。
@@ -146,6 +159,74 @@ function setSaveState(state, detail = '') {
   box.title = detail
 }
 
+let toastTimer = null
+
+/**
+ * 右上角短提示。保存成功也走这里，键盘和读屏用户不用去页头找状态。
+ * 同一时刻只留一条，新的直接覆盖旧的。
+ */
+function showToast(message, options = {}) {
+  const box = $('settings-toast')
+  if (box === null || message === '') return
+  if (toastTimer !== null) clearTimeout(toastTimer)
+  box.textContent = message
+  box.classList.toggle('is-error', options.error === true)
+  box.hidden = false
+  toastTimer = setTimeout(() => {
+    box.hidden = true
+    box.textContent = ''
+    toastTimer = null
+  }, options.duration ?? 2600)
+}
+
+/** 地址只收 http/https；留空表示不启用，不算错。 */
+function watchUrlField(id) {
+  const input = $(id)
+  if (input === null) return
+  const check = () => {
+    const raw = input.value.trim()
+    if (raw === '') {
+      input.setCustomValidity('')
+      return
+    }
+    let valid = false
+    try {
+      const url = new URL(raw)
+      valid = url.protocol === 'http:' || url.protocol === 'https:'
+    } catch {
+      valid = false
+    }
+    input.setCustomValidity(valid ? '' : '要填 http:// 或 https:// 开头的地址，例如 http://127.0.0.1:9880')
+  }
+  input.addEventListener('input', check)
+  check()
+}
+
+/**
+ * 保存前校验：数字字段走浏览器自带的 min/max/step，地址走 setCustomValidity。
+ * 失败时聚焦并滚到第一个错误字段，不让用户只看到一句「保存失败」。
+ */
+function blockInvalidSave() {
+  const controls = document.querySelectorAll('input[type="number"], #voice-local-url')
+  for (const control of controls) {
+    if (control.disabled || control.hidden) continue
+    const validity = control.validity
+    if (validity === undefined) continue
+    // step 只用于滑杆步进，不阻止保存（主进程会按范围收敛），这里只拦真正越界与格式错误。
+    const invalid =
+      validity.badInput === true ||
+      validity.rangeOverflow === true ||
+      validity.rangeUnderflow === true ||
+      validity.customError === true
+    if (!invalid) continue
+    showToast(control.validationMessage || '这个值不符合要求', { error: true, duration: 4200 })
+    control.focus({ preventScroll: true })
+    control.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    return true
+  }
+  return false
+}
+
 /** 未开放区统一锁定：可见、可读、不可操作，不用假控件骗人。 */
 function refreshLockedState() {
   const targets = document.querySelectorAll('.section.pending, .section[data-locked], .item[data-locked]')
@@ -172,23 +253,36 @@ function refreshLockedState() {
 }
 
 function showPanel(name) {
-  const group = PANEL_TO_GROUP[name]
+  const target = LEGACY_PANELS[name] ?? name
+  const group = PANEL_TO_GROUP[target]
   if (group === undefined) return
-  activePanel = name
-  lastPanelByGroup[group] = name
+  activePanel = target
+  lastPanelByGroup[group] = target
   for (const button of document.querySelectorAll('#nav button[data-group]')) {
     button.classList.toggle('active', button.dataset.group === group)
   }
   for (const panel of document.querySelectorAll('.panel')) {
-    panel.classList.toggle('active', panel.dataset.panel === name)
+    panel.classList.toggle('active', panel.dataset.panel === target)
   }
   renderSubnav(group)
-  renderPageHead(name)
+  renderPageHead(target)
   $('s-body').scrollTop = 0
-  rememberPanel(name)
+  rememberPanel(target)
   // 列表与体检按需加载：不在首屏时不去动磁盘。
-  if (name === 'memory') void refreshMemoryList()
-  if (name === 'status') void refreshPreflight()
+  if (target === 'memory') {
+    void refreshMemoryList()
+    const scopeSelect = $('memory-facts-scope')
+    const kindSelect = $('memory-facts-kind')
+    if (scopeSelect !== null) scopeSelect.onchange = () => void refreshMemoryFacts()
+    if (kindSelect !== null) kindSelect.onchange = () => void refreshMemoryFacts()
+    void refreshMemoryFacts()
+  }
+  if (target === 'data') void refreshPreflight()
+  if (target === 'routine') void refreshAgenda()
+  if (target === 'overview') {
+    void refreshOverview()
+    void refreshPreflight()
+  }
 }
 
 function showSaved() {
@@ -201,6 +295,7 @@ function showSaved() {
     tip.classList.remove('show', 'is-error')
   }
   setSaveState('saved')
+  showToast(t('save.saved'))
 }
 
 /**
@@ -217,6 +312,7 @@ function showUnsaved(detail = '') {
   }
   tip.textContent = t('foot.unsaved')
   tip.classList.add('show', 'is-error')
+  showToast(detail === '' ? t('save.error') : detail, { error: true, duration: 4200 })
 }
 
 // 余额模块和聊天都靠这一把钥匙。serviceId / field 要和主进程读的那一对保持一致，
@@ -283,6 +379,10 @@ function mergeDeep(base, patch) {
 
 /** 保存增量并回写本地副本。失败时不做乐观更新，避免界面显示假状态。 */
 async function patch(partial, options = {}) {
+  if (blockInvalidSave()) {
+    setSaveState('error', '输入不符合要求')
+    return false
+  }
   const merged = mergeDeep(current, partial)
   setSaveState('saving')
   try {
@@ -301,6 +401,12 @@ async function patch(partial, options = {}) {
     showUnsaved(error instanceof Error ? error.message : String(error))
     return false
   }
+}
+
+/** 贴近时刻滑杆的单位文案；取不到字典就退回中文。 */
+function intimacyUnit(key, fallback) {
+  const text = window.PetI18n?.t?.(key)
+  return typeof text === 'string' && text !== key ? text : fallback
 }
 
 /**
@@ -352,6 +458,13 @@ const DEFAULT_PATCH = {
   },
   live2dModelId: '',
   poseEverySeconds: 60,
+  icon: { tray: '', app: '' },
+  sticker: { source: '' },
+  askHandling: 'pet-all',
+  askEveryMinutes: 0,
+  uiMode: 'pet',
+  soundLevel: 0.5,
+  locale: 'zh-CN',
   hudName: '昔涟',
   showHud: false,
   hudDetail: 'full',
@@ -372,8 +485,68 @@ const DEFAULT_PATCH = {
     maxChars: 60,
     minIntervalSeconds: 8
   },
-  'companion.memory': { enabled: false, maxItems: 500, summarizeEvery: 8 },
-  'companion.persona': { enabled: true, extraPrompt: '' }
+  'companion.memory': { enabled: false, maxItems: 500 },
+  'companion.persona': { enabled: true, extraPrompt: '', sections: {} },
+  'companion.chat': {
+    enabled: false,
+    provider: 'deepseek',
+    model: 'deepseek-chat',
+    maxTokens: 800,
+    temperature: 0.8,
+    historyLimit: 10
+  },
+  'companion.care': {
+    dailyReview: { enabled: false, at: '22:30' },
+    // 每天最多花多少 token；0 表示不限。
+    dailyTokenBudget: { enabled: false, limit: 0 },
+    // 短时间内请求太多时先停一轮；默认每分钟 20 次，正常聊天碰不到。
+    requestGuard: { enabled: true, perMinute: 20 },
+    // 模型没回上来时用本地句接一句，不写历史。
+    offlineReply: { enabled: true }
+  },
+  'companion.emotion': {
+    // 一句话之后心情慢慢回落，不会瞬间归零。
+    afterglow: { enabled: false, halfLifeMinutes: 30 },
+    // 表情是否跟着心情走：off / experiment（真的换）/ control（只记录）。
+    expression: { group: 'off' },
+    // 连接、新鲜、成就、休息四类状态，用来决定要不要少说一句。
+    needs: { enabled: false }
+  },
+  'companion.body': {
+    enabled: true,
+    sleepWindow: { start: '23:30', end: '07:30' },
+    cycle: { enabled: false, lastStart: '' }
+  },
+  presence: {
+    aiEnabled: false,
+    intervalMinutes: 45,
+    city: '',
+    useWeather: true,
+    quiet: { enabled: true, from: '23:00', to: '08:00', mode: 'urgentOnly', hideHud: false },
+    screen: { enabled: false, consentAsked: false }
+  },
+  balance: { threshold: 20, intervalMinutes: 30 },
+  channels: {
+    qq: {
+      enabled: false,
+      transport: 'gateway',
+      appId: '',
+      credentialRef: 'vault:qq-token',
+      ownerOpenIds: [],
+      targetOpenId: '',
+      publicKey: '',
+      webhookPort: 8787,
+      imitateFormat: true
+    }
+  },
+  theme: { preset: 'SakuraPink', custom: {} },
+  modules: {
+    'builtin.bubble': { enabled: true, permissions: ['ui.render'] },
+    'builtin.reminder': { enabled: true, permissions: ['memory.read', 'memory.write'] },
+    'builtin.balance': { enabled: false, permissions: ['net.egress'] }
+  },
+  defaultEmotion: 'neutral',
+  wakeWords: []
 }
 
 /** 「全部恢复默认」覆盖的字段；刻意不动主题、语言、引导状态与模块开关。 */
@@ -406,6 +579,153 @@ function setPath(target, path, value) {
   cursor[parts[parts.length - 1]] = value
 }
 
+/**
+ * 每个一级分组挂一个「清除本模块设置」。
+ * keys 只包含设置项；记忆内容与聊天记录不在这里清，避免和「清空聊天记录」重复。
+ */
+const MODULE_RESETS = [
+  {
+    group: 'self',
+    panel: 'general',
+    keys: [
+      'nickname',
+      'profile',
+      'window',
+      'bubble',
+      'icon',
+      'sticker',
+      'live2dModelId',
+      'poseEverySeconds',
+      'soundLevel',
+      'hudName',
+      'showHud',
+      'hudDetail',
+      'hudAlpha',
+      'hudScale',
+      'hudFontScale',
+      'companion.persona'
+    ]
+  },
+  {
+    group: 'talk',
+    panel: 'connection',
+    keys: ['voice', 'locale', 'companion.chat', 'wakeWords']
+  },
+  {
+    group: 'company',
+    panel: 'proactive',
+    keys: ['presence', 'companion.care', 'companion.body']
+  },
+  { group: 'memory', panel: 'memory', keys: ['companion.memory'] },
+  { group: 'ability', panel: 'ability', keys: ['modules', 'balance'] },
+  {
+    group: 'system',
+    panel: 'account',
+    keys: ['channels', 'askHandling', 'askEveryMinutes']
+  }
+]
+
+/** 把某一分组的设置恢复成默认；只改设置，不碰聊天记录与记忆内容。 */
+async function resetModule(button) {
+  const entry = MODULE_RESETS.find((item) => item.group === button.dataset.resetModule)
+  if (entry === undefined) return
+  if (
+    !confirmAction({
+      message: t('moduleClear.confirm'),
+      strength: 'danger',
+      confirmWord: t('moduleClear.confirmWord')
+    })
+  ) {
+    return
+  }
+
+  const partial = {}
+  for (const key of entry.keys) {
+    if (Object.prototype.hasOwnProperty.call(DEFAULT_PATCH, key)) {
+      setPath(partial, key, DEFAULT_PATCH[key])
+    }
+  }
+  const ok = await patch(partial, { applySize: true })
+  if (!ok) return
+  await loadSettings()
+  renderScaleLabel($('scale').value)
+}
+
+/** 在每个分组第一个面板底部补一个模块级危险操作区。 */
+function injectModuleResets() {
+  for (const entry of MODULE_RESETS) {
+    const panel = document.querySelector(`.panel[data-panel="${entry.panel}"]`)
+    if (panel === null || panel.querySelector('.module-reset') !== null) continue
+
+    const section = document.createElement('section')
+    section.className = 'section module-reset'
+
+    const title = document.createElement('h2')
+    title.className = 'section-title'
+    title.dataset.i18n = 'moduleClear.title'
+    title.textContent = t('moduleClear.title')
+
+    const note = document.createElement('p')
+    note.className = 'section-note'
+    note.dataset.i18n = `moduleClear.${entry.group}Note`
+    note.textContent = t(note.dataset.i18n)
+
+    const zone = document.createElement('div')
+    zone.className = 'danger-zone'
+    const zoneTitle = document.createElement('div')
+    zoneTitle.className = 'danger-title'
+    zoneTitle.dataset.i18n = 'moduleClear.danger'
+    zoneTitle.textContent = t('moduleClear.danger')
+
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'danger-btn'
+    button.dataset.resetModule = entry.group
+    button.dataset.i18n = 'moduleClear.run'
+    button.textContent = t('moduleClear.run')
+    button.addEventListener('click', () => {
+      void resetModule(button)
+    })
+
+    zone.append(zoneTitle, button)
+    section.append(title, note, zone)
+    panel.append(section)
+  }
+}
+
+/**
+ * 恢复出厂设置：主进程负责清数据、写默认设置并重启。
+ * 这里只做两次确认和按钮态，失败时把原因留在页脚提示里。
+ */
+async function factoryReset() {
+  if (!confirmAction({ message: t('data.factoryConfirm'), strength: 'normal' })) return
+  if (
+    !confirmAction({
+      message: t('data.factoryConfirm'),
+      strength: 'danger',
+      confirmWord: t('data.factoryWord')
+    })
+  ) {
+    return
+  }
+
+  const button = $('factory-reset')
+  if (button !== null) {
+    button.disabled = true
+    button.textContent = t('data.factoryRunning')
+  }
+  try {
+    const result = await window.pet.factoryReset()
+    if (result?.ok !== true) throw new Error(result?.message ?? t('data.factoryFailed'))
+  } catch (error) {
+    if (button !== null) {
+      button.disabled = false
+      button.textContent = t('data.factoryRun')
+    }
+    showUnsaved(error instanceof Error ? error.message : String(error))
+  }
+}
+
 const LAST_PANEL_KEY = 'pet.settings.panel'
 
 /** 记住最后看的面板。隐私模式或配额满时读写会抛，忽略即可。 */
@@ -425,14 +745,53 @@ function readLastPanel() {
   }
 }
 
+// 搜索命中的位置，回车 / 上下键按这个顺序跳。
+let searchHits = []
+let searchCursor = -1
+
+/** 面板自己的名字也参与搜索：搜「记忆」应该能找到整个记忆页。 */
+function panelSearchName(panel) {
+  const name = panel.dataset.panel
+  const meta = PANEL_META[name]
+  const group = PANEL_TO_GROUP[name]
+  return [meta === undefined ? '' : t(meta.titleKey), group === undefined ? '' : t(PANEL_GROUPS[group].labelKey)]
+    .filter((text) => text !== '')
+    .join(' ')
+}
+
+/** 把一段 section 拆成标题、说明、条目文字与按钮文字，交给纯匹配模块。 */
+function readSearchSection(section) {
+  const title = section.querySelector(':scope > .section-title')?.textContent ?? ''
+  const note = [...section.querySelectorAll(':scope > .section-note')]
+    .map((node) => node.textContent ?? '')
+    .join(' ')
+  const itemEls = [...section.querySelectorAll('.item')]
+  const actions = [...section.querySelectorAll('.model-actions button, .model-actions select')].map(
+    (node) => node.textContent ?? ''
+  )
+  return {
+    title,
+    note,
+    actions,
+    itemEls,
+    items: itemEls.map((node) => node.textContent ?? '')
+  }
+}
+
 /** 清空搜索高亮与隐藏，恢复完整列表。 */
 function clearSearchFilter(restore = true) {
   for (const node of document.querySelectorAll('.is-search-hidden, .is-search-hit')) {
     node.classList.remove('is-search-hidden', 'is-search-hit')
   }
+  for (const group of document.querySelectorAll('details.section-group[data-search-opened]')) {
+    group.open = false
+    delete group.dataset.searchOpened
+  }
   for (const button of document.querySelectorAll('#nav button[data-group]')) {
     button.classList.remove('has-search-hit')
   }
+  searchHits = []
+  searchCursor = -1
   const empty = $('search-empty')
   if (empty !== null) empty.hidden = true
   const count = $('search-count')
@@ -443,35 +802,70 @@ function clearSearchFilter(restore = true) {
   if (restore) showPanel(activePanel)
 }
 
-/** 按关键词过滤条目：命中保留，整组无命中时连 section 一起隐藏。 */
+/** 跳到第 index 个命中位置，并把它滚到视野中间。 */
+function jumpToSearchHit(index) {
+  if (searchHits.length === 0) return
+  const hit = searchHits[index]
+  if (hit === undefined) return
+  searchCursor = index
+  showPanel(hit.panel)
+  const count = $('search-count')
+  if (count !== null) count.textContent = `${index + 1}/${searchHits.length}`
+  requestAnimationFrame(() => hit.target.scrollIntoView({ block: 'center', behavior: 'auto' }))
+}
+
+/** Enter / ↑ / ↓ 在命中项之间移动，不改变输入内容。 */
+function stepSearchHit(delta) {
+  if (searchHits.length === 0) return
+  const next = (searchCursor + delta + searchHits.length) % searchHits.length
+  jumpToSearchHit(next)
+}
+
+/**
+ * 按关键词过滤：面板名、段落标题、说明、按钮和条目文字都参与匹配。
+ * 词与词之间用空格分开，多个词同时命中才算。
+ */
 function runSearch(rawQuery) {
-  const query = rawQuery.trim().toLowerCase()
-  if (query === '') {
+  const tokens = window.SettingsSearch.tokenize(rawQuery)
+  if (tokens.length === 0) {
     clearSearchFilter(true)
     return
   }
   clearSearchFilter(false)
+  searchHits = []
 
   let total = 0
   const groupsWithHits = new Set()
   for (const panel of document.querySelectorAll('.panel')) {
     let panelHits = 0
+    const nameHit = window.SettingsSearch.matchPanelName(panelSearchName(panel), tokens)
     for (const section of panel.querySelectorAll('.section')) {
-      let sectionHits = 0
-      for (const item of section.querySelectorAll('.item')) {
-        const text = (item.textContent ?? '').toLowerCase()
-        const matched = text.includes(query)
+      const { title, note, actions, itemEls, items } = readSearchSection(section)
+      const result = nameHit
+        ? { hit: true, scope: 'section', itemHits: items.map(() => true) }
+        : window.SettingsSearch.matchSection({ title, note, actions, items }, tokens)
+
+      itemEls.forEach((item, index) => {
+        const matched = result.itemHits[index] === true
         item.classList.toggle('is-search-hidden', !matched)
         item.classList.toggle('is-search-hit', matched)
-        if (matched) sectionHits += 1
-      }
-      section.classList.toggle('is-search-hidden', sectionHits === 0)
+      })
+      section.classList.toggle('is-search-hidden', !result.hit)
+      if (!result.hit) continue
+
       // 命中的 section 可能藏在默认折叠的分组里，先展开，否则等于搜不到
-      if (sectionHits > 0) {
-        const group = section.closest('details.section-group')
-        if (group !== null) group.open = true
+      const group = section.closest('details.section-group')
+      if (group !== null && !group.open) {
+        group.open = true
+        group.dataset.searchOpened = '1'
       }
-      panelHits += sectionHits
+      panelHits += 1
+      const matchedItems = itemEls.filter((_, index) => result.itemHits[index] === true)
+      if (matchedItems.length === 0) {
+        searchHits.push({ panel: panel.dataset.panel, target: section })
+      } else {
+        for (const item of matchedItems) searchHits.push({ panel: panel.dataset.panel, target: item })
+      }
     }
     panel.classList.toggle('is-search-hidden', panelHits === 0)
     if (panelHits > 0) {
@@ -519,17 +913,8 @@ function runSearch(rawQuery) {
   }
 
   if (empty !== null) empty.hidden = true
-  const first = [...document.querySelectorAll('.panel')].find(
-    (panel) => !panel.classList.contains('is-search-hidden')
-  )
-  if (first !== undefined) {
-    showPanel(first.dataset.panel)
-    const anchor = first.querySelector('.item.is-search-hit')
-    if (anchor !== null) {
-      // 等面板切换与 details 展开完成后再滚，避免被 sticky 页头算错位置。
-      requestAnimationFrame(() => anchor.scrollIntoView({ block: 'center', behavior: 'auto' }))
-    }
-  }
+  // 输入时就落在第一个命中处，省去再按一次回车；后续用回车 / 上下键继续走。
+  jumpToSearchHit(0)
 }
 
 /** 把某个 section 涉及的字段恢复成默认值。 */
@@ -552,9 +937,9 @@ async function resetSection(button) {
 async function resetAllSettings() {
   if (
     !confirmAction({
-      message: '把昵称、外观、气泡、立绘、HUD、语音、记忆与人格设置恢复成默认？主题、语言和模块开关保持不变。',
+      message: t('data.resetAllConfirm'),
       strength: 'danger',
-      confirmWord: '全部复位'
+      confirmWord: t('data.resetAllWord')
     })
   ) {
     return
@@ -760,13 +1145,20 @@ async function loadSettings() {
   // 语言
   $('locale').value = current.locale ?? 'zh-CN'
 
+  // 唤醒词：空值在输入框里也留空，提示行会说明默认是哪几个。
+  $('chat-wake-words').value = Array.isArray(current.wakeWords)
+    ? current.wakeWords.join('、')
+    : ''
+
   // 主动台词
   const presence = current.presence ?? {}
   $('presence-ai-enabled').checked = presence.aiEnabled === true
-  $('presence-interval').value = String(presence.intervalMinutes ?? 12)
+  $('presence-interval').value = String(presence.intervalMinutes ?? 45)
   $('presence-city').value = presence.city ?? ''
   // 默认开着天气：这是「结合此刻」里最直观的一项。
   $('presence-weather').checked = presence.useWeather !== false
+  // 识屏默认关；只有用户自己在这里打开过才会读。
+  $('presence-screen').checked = presence.screen?.enabled === true
 
   const quietSettings = presence.quiet ?? {}
   $('quiet-enabled').checked = quietSettings.enabled === true
@@ -779,31 +1171,47 @@ async function loadSettings() {
       : 'urgentOnly'
   $('quiet-hide-hud').checked = quietSettings.hideHud === true
 
-  // 陪伴：四组任务与预算
+  // 陪伴：每日复盘（界面只保留这一项真的会跑的任务）
   const companion = current.companion ?? {}
   const care = companion.care ?? {}
 
   $('care-daily-review-enabled').checked = care.dailyReview?.enabled === true
   $('care-daily-review-at').value = care.dailyReview?.at ?? '22:30'
-  $('care-case-review-enabled').checked = care.caseReview?.enabled === true
-  $('care-case-review-at').value = care.caseReview?.at ?? '23:00'
-  $('care-questionnaire-enabled').checked = care.questionnaire?.enabled === true
-  $('care-maslow-enabled').checked = care.maslow?.enabled === true
-  $('care-budget').value = String(care.dailyTokenBudget ?? 20_000)
 
-  // 情绪与反思：默认关闭，缺字段时按默认值显示。
-  const emotion = companion.emotion ?? {}
-  const afterglow = emotion.afterglow ?? {}
-  $('emotion-afterglow-enabled').checked = afterglow.enabled === true
-  $('emotion-afterglow-half-life').value = String(afterglow.halfLifeMinutes ?? 30)
-  $('emotion-expression-group').value = emotion.expression?.group ?? 'off'
-  $('emotion-needs-enabled').checked = emotion.needs?.enabled === true
+  // 每日额度：0 表示不限，界面照实显示。
+  const budget = care.dailyTokenBudget ?? {}
+  const budgetEnabled = $('care-budget-enabled')
+  const budgetLimit = $('care-budget-limit')
+  if (budgetEnabled !== null) budgetEnabled.checked = budget.enabled === true
+  if (budgetLimit !== null) budgetLimit.value = String(budget.limit ?? 0)
+
+  // 请求守门与离线兜底：默认开着；关掉就完全按旧路径走。
+  const guard = care.requestGuard ?? {}
+  const guardEnabled = $('care-guard-enabled')
+  const guardPerMinute = $('care-guard-per-minute')
+  const offlineEnabled = $('care-offline-enabled')
+  if (guardEnabled !== null) guardEnabled.checked = guard.enabled !== false
+  if (guardPerMinute !== null) guardPerMinute.value = String(guard.perMinute ?? 20)
+  if (offlineEnabled !== null) offlineEnabled.checked = care.offlineReply?.enabled !== false
+
+  // 情绪与需求：默认都关着，打开才影响表情和开口分寸。
+  const emotionConfig = companion.emotion ?? {}
+  const afterglow = emotionConfig.afterglow ?? {}
+  const expressionConfig = emotionConfig.expression ?? {}
+  const needs = emotionConfig.needs ?? {}
+  const afterglowEnabled = $('emotion-afterglow-enabled')
+  const afterglowHalfLife = $('emotion-afterglow-half-life')
+  const expressionGroup = $('emotion-expression-group')
+  const needsEnabled = $('emotion-needs-enabled')
+  if (afterglowEnabled !== null) afterglowEnabled.checked = afterglow.enabled === true
+  if (afterglowHalfLife !== null) afterglowHalfLife.value = String(afterglow.halfLifeMinutes ?? 30)
+  if (expressionGroup !== null) expressionGroup.value = expressionConfig.group ?? 'off'
+  if (needsEnabled !== null) needsEnabled.checked = needs.enabled === true
 
   // 记忆
   const memory = companion.memory ?? {}
   $('memory-enabled').checked = memory.enabled === true
   $('memory-max-items').value = String(memory.maxItems ?? 500)
-  $('memory-summarize-every').value = String(memory.summarizeEvery ?? 8)
 
   // 聊天
   const chat = companion.chat ?? {}
@@ -818,12 +1226,29 @@ async function loadSettings() {
   const persona = companion.persona ?? {}
   $('persona-enabled').checked = persona.enabled !== false
   $('persona-extra').value = persona.extraPrompt ?? ''
+  for (const key of PERSONA_SECTIONS) {
+    const field = personaField(key)
+    if (field !== null) field.value = persona.sections?.[key] ?? ''
+    updatePersonaSectionCount(key)
+  }
   updatePersonaCount()
   void renderPersonaPreview()
+
+  // 贴近时刻：开关 + 两个节奏滑杆；次数与冷却由主进程按版本固定。
+  const intimacy = companion.intimacy ?? {}
+  $('intimacy-enabled').checked = intimacy.enabled === true
+  const idleHours = Number(intimacy.idleHours ?? 6)
+  $('intimacy-idle').value = String(idleHours)
+  $('intimacy-idle-value').textContent = `${idleHours} ${intimacyUnit('persona.intimacyHoursUnit', '小时')}`
+  const aftercareMinutes = Number(intimacy.aftercareMinutes ?? 120)
+  $('intimacy-aftercare').value = String(aftercareMinutes)
+  $('intimacy-aftercare-value').textContent =
+    `${aftercareMinutes} ${intimacyUnit('persona.intimacyMinutesUnit', '分钟')}`
 
   // QQ：凭据本体在 Vault，这里只回显 appId、主人名单与传输方式。
   const qq = current.channels?.qq ?? {}
   $('qq-enabled').checked = qq.enabled === true
+  $('qq-imitate-format').checked = qq.imitateFormat !== false
   $('qq-transport').value = qq.transport === 'webhook' ? 'webhook' : 'gateway'
   updateQqTransportVisibility()
   $('qq-app-id').value = qq.appId ?? ''
@@ -1053,6 +1478,151 @@ async function refreshMemoryList() {
   }
 }
 
+/** 来源标签：桌面 / QQ 私聊 / QQ 群聊 / 共同。 */
+function factScopeLabel(scope) {
+  if (scope === 'shared') return '共同'
+  if (scope === 'desktop') return '桌面'
+  if (scope.startsWith('qq:group')) return 'QQ 群聊'
+  if (scope.startsWith('qq:')) return 'QQ 私聊'
+  return '其他'
+}
+
+/**
+ * 结构化事实：偏好 / 人物 / 项目 / 约定。
+ * 可按来源与分类筛选；每条都能就地改文字或删掉。
+ */
+async function refreshMemoryFacts() {
+  const box = $('memory-facts-list')
+  if (box === null) return
+  if (typeof window.pet.getMemoryFacts !== 'function') {
+    box.textContent = t('memory.unsupported')
+    return
+  }
+  const scopeSelect = $('memory-facts-scope')
+  const kindSelect = $('memory-facts-kind')
+  const scope = scopeSelect === null ? 'all' : scopeSelect.value
+  const kind = kindSelect === null ? '' : kindSelect.value
+  try {
+    const result = await window.pet.getMemoryFacts({ scope, kind })
+    const active = $('memory-facts-active')
+    const archived = $('memory-facts-archived')
+    if (active !== null) active.textContent = String(result?.active ?? 0)
+    if (archived !== null) archived.textContent = String(result?.archived ?? 0)
+    if (result?.ok === false) {
+      box.textContent = t('memory.factsUnavailable')
+      return
+    }
+
+    const items = Array.isArray(result?.facts) ? result.facts : []
+    box.textContent = ''
+    if (items.length === 0) {
+      const empty = document.createElement('div')
+      empty.className = 'memory-empty'
+      empty.textContent = t('memory.factsEmpty')
+      box.append(empty)
+      return
+    }
+
+    const kindLabel = {
+      lesson: t('memory.factKindLesson'),
+      preference: t('memory.factKindPreference'),
+      person: t('memory.factKindPerson'),
+      project: t('memory.factKindProject'),
+      promise: t('memory.factKindPromise')
+    }
+    for (const item of items) {
+      const row = document.createElement('div')
+      row.className = 'memory-row'
+      row.style.opacity = item.archived === true ? '0.55' : '1'
+
+      const meta = document.createElement('div')
+      meta.className = 'memory-meta'
+      const kindName = kindLabel[item.kind] ?? String(item.kind ?? '')
+      const strength = Number(item.strength ?? 0).toFixed(1)
+      const marks = [`${factScopeLabel(String(item.scope ?? 'desktop'))} · ${kindName} · ${strength}`]
+      if (item.mentions > 1) marks.push(t('memory.factMentions').replace('{count}', String(item.mentions)))
+      if (item.archived === true) marks.push(t('memory.factArchived'))
+      meta.textContent = marks.join(' · ')
+
+      const text = document.createElement('div')
+      text.className = 'memory-text'
+      text.textContent = typeof item.text === 'string' ? item.text : ''
+
+      const actions = document.createElement('div')
+      actions.className = 'memory-actions'
+
+      // 就地改：点一下进入可编辑，再点一下保存。不做弹窗，避免打断。
+      let editing = false
+      const editBtn = document.createElement('button')
+      editBtn.type = 'button'
+      editBtn.textContent = '改'
+      editBtn.addEventListener('click', async () => {
+        if (!editing) {
+          editing = true
+          editBtn.textContent = '保存'
+          text.contentEditable = 'true'
+          text.classList.add('memory-text-editing')
+          text.focus()
+          const range = document.createRange()
+          range.selectNodeContents(text)
+          const selection = window.getSelection()
+          if (selection !== null) {
+            selection.removeAllRanges()
+            selection.addRange(range)
+          }
+          return
+        }
+        const next = text.textContent.trim()
+        if (next === '') {
+          text.textContent = typeof item.text === 'string' ? item.text : ''
+          return
+        }
+        if (typeof window.pet.updateMemoryFact !== 'function') return
+        const saved = await window.pet.updateMemoryFact(item.id, next).catch(() => null)
+        editing = false
+        text.contentEditable = 'false'
+        text.classList.remove('memory-text-editing')
+        editBtn.textContent = '改'
+        if (saved?.ok !== true) {
+          text.textContent = typeof item.text === 'string' ? item.text : ''
+        }
+        refreshMemoryFacts()
+      })
+
+      const deleteBtn = document.createElement('button')
+      deleteBtn.type = 'button'
+      deleteBtn.textContent = '删'
+      deleteBtn.addEventListener('click', async () => {
+        if (
+          !confirmAction({
+            message: `删掉这条记忆？\n\n${String(item.text ?? '').slice(0, 80)}`,
+            strength: 'danger',
+            confirmWord: '删除'
+          })
+        ) {
+          return
+        }
+        if (typeof window.pet.removeMemoryFact !== 'function') return
+        const removed = await window.pet.removeMemoryFact(item.id).catch(() => null)
+        if (removed?.ok !== true) {
+          showToast('这条记忆没删掉，稍后再试', { error: true })
+          return
+        }
+        showToast('已删除')
+        refreshMemoryFacts()
+      })
+
+      actions.append(editBtn, deleteBtn)
+      row.append(meta, text, actions)
+      box.append(row)
+    }
+  } catch (error) {
+    box.textContent = `${t('memory.readFailed')}：${
+      error instanceof Error ? error.message : String(error)
+    }`
+  }
+}
+
 async function exportMemory() {
   const status = $('memory-export-status')
   if (typeof window.pet.exportMemory !== 'function') return
@@ -1086,13 +1656,27 @@ async function exportMemory() {
 /** 删除单条：删完按剩余总数修正页码，再刷新统计与列表。 */
 async function deleteMemoryEntry(id) {
   if (typeof window.pet.deleteMemory !== 'function') return
+  if (
+    !confirmAction({
+      message: '删掉这条对话记忆？摘要与原文会一起移除，无法恢复。',
+      strength: 'danger',
+      confirmWord: '删除'
+    })
+  ) {
+    return
+  }
   try {
     const result = await window.pet.deleteMemory(id)
-    if (result?.ok === false && result.reason !== 'not-found') return
+    if (result?.ok === false && result.reason !== 'not-found') {
+      showToast('这条记忆没删掉，稍后再试', { error: true })
+      return
+    }
+    showToast('已删除')
     if (memoryOffset > 0 && memoryTotal <= memoryOffset + 1) {
       memoryOffset = Math.max(0, memoryOffset - MEMORY_PAGE_SIZE)
     }
     await refreshMemoryStats()
+    await refreshMemoryFacts()
     await refreshMemoryList()
   } catch {
     // 删除失败时保持现状；下一次刷新会显示真实结果。
@@ -1180,6 +1764,168 @@ async function refreshPreflight() {
   }
 }
 
+/** 今日日程：只读「现在 / 接下来」；还没生成时给一句说明，不造内容。 */
+async function refreshAgenda() {
+  const box = $('companion-agenda-note')
+  if (box === null) return
+  if (typeof window.pet.companionAgenda !== 'function') {
+    box.textContent = t('companion.agendaEmpty')
+    return
+  }
+  try {
+    const result = await window.pet.companionAgenda()
+    const note = result?.ok === true && typeof result.note === 'string' ? result.note.trim() : ''
+    box.textContent = note !== '' ? note : t('companion.agendaEmpty')
+  } catch {
+    box.textContent = t('companion.agendaEmpty')
+  }
+}
+
+/** 手动顺延：改不改由主进程判断，这里只把结果翻译成一句人话。 */
+async function delayAgenda() {
+  const status = $('companion-agenda-status')
+  if (typeof window.pet.rescheduleAgenda !== 'function') return
+  if (status !== null) status.textContent = ''
+  try {
+    const result = await window.pet.rescheduleAgenda(30)
+    if (result?.ok !== true) {
+      if (status !== null) status.textContent = t('companion.agendaFailed')
+      return
+    }
+    if (status !== null) {
+      if (result.changed === true) {
+        status.textContent = t('companion.agendaShifted')
+      } else {
+        const reason = result.reason
+        const key =
+          reason === 'disabled'
+            ? 'companion.agendaDisabled'
+            : reason === 'no-agenda'
+              ? 'companion.agendaMissing'
+              : reason === 'sleeping'
+                ? 'companion.agendaSleeping'
+                : reason === 'no-room'
+                  ? 'companion.agendaNoRoom'
+                  : reason === 'rejected'
+                    ? 'companion.agendaRejected'
+                    : 'companion.agendaNotChanged'
+        status.textContent = t(key)
+      }
+    }
+    await refreshAgenda()
+  } catch {
+    if (status !== null) status.textContent = t('companion.agendaFailed')
+  }
+}
+
+/** 概览：只汇总已经读得到的三种状态，读不到就写「还没读到」。 */
+async function refreshOverview() {
+  const model = $('overview-model')
+  const voice = $('overview-voice')
+  const agenda = $('overview-agenda')
+  if (model === null && voice === null && agenda === null) return
+
+  if (typeof window.pet.preflight === 'function') {
+    try {
+      const info = await window.pet.preflight()
+      const models = info?.ok === true ? (info.models ?? {}) : null
+      const secret = info?.ok === true ? (info.secret ?? {}) : null
+      const speech = info?.ok === true ? (info.voice ?? {}) : null
+      if (model !== null) {
+        model.textContent =
+          models !== null && models.count > 0 && models.activeValid === true && secret?.configured === true
+            ? t('overview.modelReady')
+            : t('overview.modelMissing')
+      }
+      if (voice !== null) {
+        const provider = speech?.provider
+        voice.textContent =
+          typeof provider === 'string' && provider !== 'off'
+            ? (VOICE_PROVIDER_LABEL[provider] ?? provider)
+            : t('overview.voiceOff')
+      }
+    } catch {
+      if (model !== null) model.textContent = t('overview.unknown')
+      if (voice !== null) voice.textContent = t('overview.unknown')
+    }
+  } else {
+    if (model !== null) model.textContent = t('overview.unknown')
+    if (voice !== null) voice.textContent = t('overview.unknown')
+  }
+
+  if (agenda !== null) {
+    if (typeof window.pet.companionAgenda !== 'function') {
+      agenda.textContent = t('overview.agendaEmpty')
+      return
+    }
+    try {
+      const result = await window.pet.companionAgenda()
+      const note = result?.ok === true && typeof result.note === 'string' ? result.note.trim() : ''
+      agenda.textContent = note !== '' ? note : t('overview.agendaEmpty')
+    } catch {
+      agenda.textContent = t('overview.agendaEmpty')
+    }
+  }
+}
+
+/** 结构化事实导出：主进程弹保存框，成功后把真实路径写在下面。 */
+async function exportMemoryFacts() {
+  const status = $('memory-facts-status')
+  if (typeof window.pet.exportMemoryFacts !== 'function') return
+  try {
+    const result = await window.pet.exportMemoryFacts({ scope: 'all', includeArchived: true })
+    if (result?.canceled === true) return
+    if (result?.ok !== true) {
+      if (status !== null) {
+        status.textContent =
+          result?.code === 'MEMORY_EMPTY'
+            ? t('memory.factsExportEmpty')
+            : `${t('memory.factsExportFailed')} · ${result?.message ?? result?.code ?? ''}`
+      }
+      return
+    }
+    if (status !== null) status.textContent = `${t('memory.factsExported')} · ${result.path}`
+  } catch (error) {
+    if (status !== null) {
+      status.textContent = `${t('memory.factsExportFailed')} · ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    }
+  }
+}
+
+/** 结构化事实导入：主进程读完才回来；成功后连同统计与列表一起刷新。 */
+async function importMemoryFacts() {
+  const status = $('memory-facts-status')
+  if (typeof window.pet.importMemoryFacts !== 'function') return
+  if (status !== null) status.textContent = ''
+  try {
+    const result = await window.pet.importMemoryFacts({ scope: 'all', includeArchived: true })
+    if (result?.canceled === true) return
+    if (result?.ok !== true) {
+      if (status !== null) {
+        status.textContent =
+          result?.reason === 'empty'
+            ? t('memory.factsImportEmpty')
+            : `${t('memory.factsImportFailed')} · ${result?.message ?? result?.reason ?? ''}`
+      }
+      return
+    }
+    const added = Number(result.added ?? 0)
+    const merged = Number(result.merged ?? 0)
+    if (status !== null) status.textContent = `${t('memory.factsImported')} · +${added} / ${merged}`
+    await refreshMemoryFacts()
+    await refreshMemoryStats()
+    await refreshMemoryList()
+  } catch (error) {
+    if (status !== null) {
+      status.textContent = `${t('memory.factsImportFailed')} · ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    }
+  }
+}
+
 /** 陪伴任务状态：没跑过就写「尚未运行」。 */
 async function refreshCareStatus() {
   const last = $('care-last-run')
@@ -1199,6 +1945,53 @@ async function refreshCareStatus() {
   } catch (error) {
     last.textContent = `读取失败：${error instanceof Error ? error.message : String(error)}`
   }
+}
+
+const PERSONA_SECTIONS = ['identity', 'lore', 'worldview', 'lifeview', 'values', 'manner', 'style']
+
+/** 主进程下发的默认段落；拉不到就留空，输入框仍按「留空跟随默认」处理。 */
+let personaSectionDefaults = {}
+
+function personaField(key) {
+  return $(`persona-section-${key}`)
+}
+
+/** 每一段的字数：上限取自 textarea 自身，超九成变黄、写满变红。 */
+function updatePersonaSectionCount(key) {
+  const field = personaField(key)
+  const counter = $(`persona-section-${key}-count`)
+  if (field === null || counter === null) return
+  const max = field.maxLength > 0 ? field.maxLength : 1200
+  const used = field.value.length
+  counter.textContent = `${used} / ${max}`
+  counter.classList.toggle('is-near', used >= max * 0.9 && used < max)
+  counter.classList.toggle('is-full', used >= max)
+}
+
+/** 把空着的段落填上默认文本，方便直接改；已有自定义内容不动。 */
+function fillPersonaSectionDefaults() {
+  if (Object.keys(personaSectionDefaults).length === 0) return
+  for (const key of PERSONA_SECTIONS) {
+    const field = personaField(key)
+    if (field === null) continue
+    const saved = current?.companion?.persona?.sections?.[key]
+    field.value =
+      typeof saved === 'string' && saved.trim() !== ''
+        ? saved
+        : (personaSectionDefaults[key] ?? '')
+    updatePersonaSectionCount(key)
+  }
+}
+
+/** 值与默认一致就存空串，继续跟随默认；改过才落自定义。 */
+async function savePersonaSection(key) {
+  const field = personaField(key)
+  if (field === null) return
+  const value = field.value
+  const fallback = personaSectionDefaults[key] ?? ''
+  const stored = value.trim() === '' || value.trim() === fallback.trim() ? '' : value
+  await patch({ companion: { persona: { sections: { [key]: stored } } } })
+  await renderPersonaPreview()
 }
 
 /** 人格额外说明的字数：随输入实时更新，上限取自 textarea 自身。 */
@@ -1221,14 +2014,18 @@ function updatePersonaCount() {
 async function renderPersonaPreview() {
   const box = $('persona-preview')
   const persona = current?.companion?.persona ?? {}
-  if (persona.enabled === false) {
-    box.textContent = '人格提示词已关闭，只使用最基础的语气设定。'
-    return
-  }
 
   if (typeof window.pet.getPersonaPreview === 'function') {
     try {
       const result = await window.pet.getPersonaPreview()
+      if (result?.defaults && Object.keys(personaSectionDefaults).length === 0) {
+        personaSectionDefaults = result.defaults
+        fillPersonaSectionDefaults()
+      }
+      if (persona.enabled === false) {
+        box.textContent = '人格提示词已关闭，只使用最基础的语气设定。'
+        return
+      }
       if (typeof result?.text === 'string' && result.text.trim() !== '') {
         box.textContent = result.text
         return
@@ -1236,6 +2033,11 @@ async function renderPersonaPreview() {
     } catch {
       // 回退到下面的本地简版，不把错误页塞给用户。
     }
+  }
+
+  if (persona.enabled === false) {
+    box.textContent = '人格提示词已关闭，只使用最基础的语气设定。'
+    return
   }
 
   const extra = (persona.extraPrompt ?? '').trim()
@@ -1466,6 +2268,7 @@ function bindEvents() {
   }
 
   // 本地合成：地址与参考音频也各存各的，互不覆盖。
+  watchUrlField('voice-local-url')
   $('voice-local-url').addEventListener('change', () => {
     void patch({ voice: { localUrl: $('voice-local-url').value.trim() } })
   })
@@ -1500,6 +2303,114 @@ function bindEvents() {
       }
     } finally {
       button.disabled = false
+    }
+  })
+
+  // ---- 用声音叫醒：默认关闭；运行时按需下载，不随安装包走 ----
+  const renderWake = (status) => {
+    const hint = $('wake-runtime-status')
+    const installBtn = $('wake-install-btn')
+    const removeBtn = $('wake-remove-btn')
+    const toggle = $('wake-enabled')
+    if (status === null) return
+    if (toggle !== null) toggle.checked = status.enabled === true
+    if (hint !== null) {
+      if (status.installedVersion) {
+        hint.textContent = `${t('wake.statusInstalled')} · ${status.installedVersion}`
+      } else if (status.manifestConfigured === false) {
+        hint.textContent = t('wake.statusNoSource')
+      } else {
+        hint.textContent = t('wake.statusMissing')
+      }
+    }
+    if (installBtn !== null) {
+      installBtn.disabled = status.installing === true || status.installedVersion !== null
+      installBtn.textContent = status.installing === true ? t('wake.installing') : t('wake.install')
+    }
+    if (removeBtn !== null) removeBtn.disabled = status.installing === true || !status.installedVersion
+  }
+
+  const refreshWake = async () => {
+    try {
+      renderWake(await window.pet.wakeStatus())
+    } catch {
+      $('wake-runtime-status')?.replaceChildren(document.createTextNode(t('wake.statusUnknown')))
+    }
+  }
+  void refreshWake()
+
+  $('wake-enabled')?.addEventListener('change', async () => {
+    const toggle = $('wake-enabled')
+    // 内测未开放：控件留在原位，但不接受操作；这里兜住键盘与脚本触发的 change。
+    if (toggle.closest('.beta-locked') !== null) {
+      toggle.checked = !toggle.checked
+      return
+    }
+    const wanted = toggle.checked === true
+    toggle.disabled = true
+    try {
+      const result = await window.pet.wakeSetEnabled(wanted)
+      if (result?.ok !== true) {
+        // 没装运行时就不让开关停在「已开」，否则用户会以为她在听。
+        toggle.checked = false
+        $('wake-runtime-status')?.replaceChildren(document.createTextNode(t('wake.statusMissing')))
+        $('wake-install-btn')?.focus()
+        return
+      }
+      renderWake(result)
+    } catch {
+      toggle.checked = false
+    } finally {
+      toggle.disabled = false
+    }
+  })
+
+  // 点徽标解锁：先把代价说清楚，接受后只在这个窗口内放开，重开又回到锁定。
+  $('wake-unlock-btn')?.addEventListener('click', () => {
+    const badge = $('wake-unlock-btn')
+    if (badge === null) return
+    const item = badge.closest('.beta-locked')
+    const toggle = $('wake-enabled')
+    if (item === null || toggle === null) return
+    if (window.confirm(t('beta.unlockWarn')) !== true) return
+    item.classList.remove('beta-locked')
+    item.setAttribute('aria-disabled', 'false')
+    toggle.removeAttribute('tabindex')
+    const hint = item.querySelector('.item-hint')
+    if (hint !== null) {
+      hint.setAttribute('data-i18n', 'wake.enabledHintUnlocked')
+      hint.textContent = t('wake.enabledHintUnlocked')
+    }
+    badge.remove()
+  })
+
+  $('wake-install-btn')?.addEventListener('click', async () => {
+    const button = $('wake-install-btn')
+    button.disabled = true
+    button.textContent = t('wake.installing')
+    try {
+      const result = await window.pet.wakeInstall()
+      if (result?.ok !== true) {
+        $('wake-runtime-status')?.replaceChildren(
+          document.createTextNode(`${t('wake.installFailed')} · ${result?.reason ?? 'unknown'}`)
+        )
+        return
+      }
+      await refreshWake()
+    } catch {
+      $('wake-runtime-status')?.replaceChildren(document.createTextNode(t('wake.installFailed')))
+    } finally {
+      await refreshWake()
+    }
+  })
+
+  $('wake-remove-btn')?.addEventListener('click', async () => {
+    const button = $('wake-remove-btn')
+    button.disabled = true
+    try {
+      await window.pet.wakeRemove()
+    } finally {
+      await refreshWake()
     }
   })
 
@@ -1690,6 +2601,11 @@ function bindEvents() {
     void patch({ locale: $('locale').value })
   })
 
+  // 唤醒词：失焦时保存，避免每敲一个字就写一次配置。
+  $('chat-wake-words').addEventListener('change', () => {
+    void patch({ wakeWords: parseWakeWords($('chat-wake-words').value) })
+  })
+
   // 主动台词：参数即时保存；「试一句」真的请求一次，失败照实显示，不写「已完成」。
   $('presence-ai-enabled').addEventListener('change', () => {
     void patch({ presence: { aiEnabled: $('presence-ai-enabled').checked } })
@@ -1705,6 +2621,13 @@ function bindEvents() {
 
   $('presence-weather').addEventListener('change', () => {
     void patch({ presence: { useWeather: $('presence-weather').checked } })
+  })
+
+  // 在这里手动打开也算一次明确同意，不用再弹一次首启询问。
+  $('presence-screen').addEventListener('change', () => {
+    void patch({
+      presence: { screen: { enabled: $('presence-screen').checked, consentAsked: true } }
+    })
   })
 
   // 夜间不扰：开关、时段、方式都即时保存，主进程每 30 秒重新判定一次。
@@ -1764,14 +2687,10 @@ function bindEvents() {
     })
   }
 
-  // 陪伴任务
+  // 陪伴任务：只绑定界面上还在的每日复盘
   const careBindings = [
     ['care-daily-review-enabled', 'dailyReview', 'enabled', 'checkbox'],
-    ['care-daily-review-at', 'dailyReview', 'at', 'text'],
-    ['care-case-review-enabled', 'caseReview', 'enabled', 'checkbox'],
-    ['care-case-review-at', 'caseReview', 'at', 'text'],
-    ['care-questionnaire-enabled', 'questionnaire', 'enabled', 'checkbox'],
-    ['care-maslow-enabled', 'maslow', 'enabled', 'checkbox']
+    ['care-daily-review-at', 'dailyReview', 'at', 'text']
   ]
 
   for (const [id, group, key, kind] of careBindings) {
@@ -1781,34 +2700,66 @@ function bindEvents() {
     })
   }
 
-  $('care-budget').addEventListener('change', () => {
-    void patch({ companion: { care: { dailyTokenBudget: Number($('care-budget').value) } } })
-  })
-
-  // 情绪：半衰期由迁移器夹取，这里只负责把用户输入原样交上去。
-  $('emotion-afterglow-enabled').addEventListener('change', () => {
-    void patch({
-      companion: { emotion: { afterglow: { enabled: $('emotion-afterglow-enabled').checked } } }
+  // 每日额度：开关和上限分开绑，改一个不会把另一个冲掉。
+  const budgetEnabled = $('care-budget-enabled')
+  const budgetLimit = $('care-budget-limit')
+  if (budgetEnabled !== null) {
+    budgetEnabled.addEventListener('change', () => {
+      void patch({ companion: { care: { dailyTokenBudget: { enabled: budgetEnabled.checked } } } })
     })
-  })
-
-  $('emotion-afterglow-half-life').addEventListener('change', () => {
-    void patch({
-      companion: {
-        emotion: { afterglow: { halfLifeMinutes: Number($('emotion-afterglow-half-life').value) } }
-      }
+  }
+  if (budgetLimit !== null) {
+    budgetLimit.addEventListener('change', () => {
+      const value = Number.parseInt(budgetLimit.value, 10)
+      const limit = Number.isFinite(value) ? Math.max(0, value) : 0
+      budgetLimit.value = String(limit)
+      void patch({ companion: { care: { dailyTokenBudget: { limit } } } })
     })
-  })
+  }
 
-  $('emotion-expression-group').addEventListener('change', () => {
-    void patch({
-      companion: { emotion: { expression: { group: $('emotion-expression-group').value } } }
+  // 请求守门与离线兜底：开关和上限各自独立，改一个不冲掉另一个。
+  const guardEnabled = $('care-guard-enabled')
+  const guardPerMinute = $('care-guard-per-minute')
+  const offlineEnabled = $('care-offline-enabled')
+  if (guardEnabled !== null) {
+    guardEnabled.addEventListener('change', () => {
+      void patch({ companion: { care: { requestGuard: { enabled: guardEnabled.checked } } } })
     })
-  })
+  }
+  if (guardPerMinute !== null) {
+    guardPerMinute.addEventListener('change', () => {
+      const value = Number.parseInt(guardPerMinute.value, 10)
+      const perMinute = Number.isFinite(value) ? Math.min(120, Math.max(1, value)) : 20
+      guardPerMinute.value = String(perMinute)
+      void patch({ companion: { care: { requestGuard: { perMinute } } } })
+    })
+  }
+  if (offlineEnabled !== null) {
+    offlineEnabled.addEventListener('change', () => {
+      void patch({ companion: { care: { offlineReply: { enabled: offlineEnabled.checked } } } })
+    })
+  }
 
-  $('emotion-needs-enabled').addEventListener('change', () => {
-    void patch({ companion: { emotion: { needs: { enabled: $('emotion-needs-enabled').checked } } } })
-  })
+  // 情绪与需求：每一项都只改自己的那一层。
+  const emotionBindings = [
+    ['emotion-afterglow-enabled', (value) => ({ afterglow: { enabled: value === true } })],
+    ['emotion-afterglow-half-life', (value) => ({ afterglow: { halfLifeMinutes: value } })],
+    ['emotion-expression-group', (value) => ({ expression: { group: value } })],
+    ['emotion-needs-enabled', (value) => ({ needs: { enabled: value === true } })]
+  ]
+
+  for (const [id, build] of emotionBindings) {
+    const element = $(id)
+    if (element === null) continue
+    element.addEventListener('change', () => {
+      const raw = element.type === 'checkbox' ? element.checked : element.value
+      const value =
+        element.type === 'number' || element.type === 'range'
+          ? Number.parseInt(String(raw), 10)
+          : raw
+      void patch({ companion: { emotion: build(value) } })
+    })
+  }
 
   // 手动触发巡视与反思：结果只回显真实返回值，不拼一句「已完成」。
   const dailyResult = $('daily-result')
@@ -1861,12 +2812,6 @@ function bindEvents() {
     void patch({ companion: { memory: { maxItems: Number($('memory-max-items').value) } } })
   })
 
-  $('memory-summarize-every').addEventListener('change', () => {
-    void patch({
-      companion: { memory: { summarizeEvery: Number($('memory-summarize-every').value) } }
-    })
-  })
-
   // 记忆搜索：输入停顿 300ms 再查，命中结果从第一页开始。
   const memorySearch = $('memory-search')
   if (memorySearch !== null) {
@@ -1916,11 +2861,57 @@ function bindEvents() {
     })
   }
 
+  // 她记住的事：整份 JSONL 备份与还原，换机时能带走。
+  const memoryFactsExport = $('memory-facts-export')
+  if (memoryFactsExport !== null) {
+    memoryFactsExport.addEventListener('click', () => {
+      void exportMemoryFacts()
+    })
+  }
+
+  const memoryFactsImport = $('memory-facts-import')
+  if (memoryFactsImport !== null) {
+    memoryFactsImport.addEventListener('click', () => {
+      void importMemoryFacts()
+    })
+  }
+
+  // 今日日程：手动看一次，或把后面的安排顺延半小时。
+  const agendaRefresh = $('companion-agenda-refresh')
+  if (agendaRefresh !== null) {
+    agendaRefresh.addEventListener('click', () => {
+      void refreshAgenda()
+    })
+  }
+
+  const agendaDelay = $('companion-agenda-delay')
+  if (agendaDelay !== null) {
+    agendaDelay.addEventListener('click', () => {
+      void delayAgenda()
+    })
+  }
+
+  // 想看完整观察数据时，直接开观察台并落在对应分区，设置页不再重复铺一份。
+  const agendaOpen = $('companion-agenda-open')
+  if (agendaOpen !== null) {
+    agendaOpen.addEventListener('click', () => {
+      void window.pet?.openInsight?.('today')
+    })
+  }
+
+  const memoryOpen = $('memory-open-insight')
+  if (memoryOpen !== null) {
+    memoryOpen.addEventListener('click', () => {
+      void window.pet?.openInsight?.('memory')
+    })
+  }
+
   // 记忆列表：刷新、翻页、单条删除。
   const memoryRefresh = $('memory-refresh')
   if (memoryRefresh !== null) {
     memoryRefresh.addEventListener('click', () => {
       void refreshMemoryStats()
+      void refreshMemoryFacts()
       void refreshMemoryList()
     })
   }
@@ -1948,6 +2939,15 @@ function bindEvents() {
   if (preflightRefresh !== null) {
     preflightRefresh.addEventListener('click', () => {
       void refreshPreflight()
+      void refreshStatusCards()
+    })
+  }
+
+  // 一键诊断：把脱敏读数复制到剪贴板，方便用户直接贴给别人看。
+  const diagnosticsCopy = $('diagnostics-copy')
+  if (diagnosticsCopy !== null) {
+    diagnosticsCopy.addEventListener('click', () => {
+      void copyDiagnostics()
     })
   }
 
@@ -1983,6 +2983,40 @@ function bindEvents() {
     void renderPersonaPreview()
   })
 
+  // 贴近时刻：打开前再确认一次；取消就把开关拨回去，不留半开状态。
+  $('intimacy-enabled').addEventListener('change', () => {
+    const toggle = $('intimacy-enabled')
+    if (toggle.checked !== true) {
+      void patch({ companion: { intimacy: { enabled: false } } })
+      return
+    }
+    const agreed = confirmAction({
+      message:
+        '打开后，她会在桌面本机、有由头的时候偶尔靠近一点；群聊和 QQ 不会触发。要打开吗？'
+    })
+    if (agreed !== true) {
+      toggle.checked = false
+      return
+    }
+    void patch({ companion: { intimacy: { enabled: true } } })
+  })
+
+  // 两个节奏滑杆：拖动只改读数，松手才写入，免得一路拖一路落盘。
+  $('intimacy-idle').addEventListener('input', (event) => {
+    $('intimacy-idle-value').textContent =
+      `${Number(event.target.value)} ${intimacyUnit('persona.intimacyHoursUnit', '小时')}`
+  })
+  $('intimacy-idle').addEventListener('change', (event) => {
+    void patch({ companion: { intimacy: { idleHours: Number(event.target.value) } } })
+  })
+  $('intimacy-aftercare').addEventListener('input', (event) => {
+    $('intimacy-aftercare-value').textContent =
+      `${Number(event.target.value)} ${intimacyUnit('persona.intimacyMinutesUnit', '分钟')}`
+  })
+  $('intimacy-aftercare').addEventListener('change', (event) => {
+    void patch({ companion: { intimacy: { aftercareMinutes: Number(event.target.value) } } })
+  })
+
   $('persona-extra').addEventListener('input', () => {
     updatePersonaCount()
   })
@@ -1991,6 +3025,24 @@ function bindEvents() {
     void patch({ companion: { persona: { extraPrompt: $('persona-extra').value } } })
     void renderPersonaPreview()
   })
+
+  // 人格六段：输入时只更新字数，失焦或回车结束后落盘；恢复默认写空串继续跟随默认。
+  for (const key of PERSONA_SECTIONS) {
+    const field = personaField(key)
+    if (field === null) continue
+    field.addEventListener('input', () => updatePersonaSectionCount(key))
+    field.addEventListener('change', () => {
+      void savePersonaSection(key)
+    })
+    $(`persona-section-${key}-reset`)?.addEventListener('click', () => {
+      field.value = personaSectionDefaults[key] ?? ''
+      updatePersonaSectionCount(key)
+      void (async () => {
+        await patch({ companion: { persona: { sections: { [key]: '' } } } })
+        await renderPersonaPreview()
+      })()
+    })
+  }
 
   // 模块开关。写进 settings.modules，主窗口下次启动按它决定是否 bootstrap；
   // 气泡的显隐由主窗口监听 settings 变更即时处理。
@@ -2003,6 +3055,18 @@ function bindEvents() {
       void patch({ modules: { [moduleId]: { enabled: event.target.checked } } })
     })
   }
+
+  // 概览：三步引导只负责带路，具体设置仍在各自面板。
+  $('overview-open-chat').addEventListener('click', () => showPanel('connection'))
+  $('overview-open-voice').addEventListener('click', () => showPanel('voice'))
+  $('overview-open-company').addEventListener('click', () => showPanel('routine'))
+  $('overview-open-insight').addEventListener('click', async () => {
+    try {
+      await window.pet.openInsight()
+    } catch (error) {
+      window.alert(`打开观察台失败：${error instanceof Error ? error.message : String(error)}`)
+    }
+  })
 
   // 能力中心：窗口由主进程单例管理，这里只负责把请求发出去。
   $('open-ability-center').addEventListener('click', async () => {
@@ -2032,9 +3096,11 @@ function bindEvents() {
   }
 
   function fillGameForm(config) {
-    $('game-select').value = config.game ?? 'genshin'
     $('game-time').value = config.time ?? '04:00'
     $('game-timeout').value = String(config.timeoutMinutes ?? 150)
+    $('game-enabled').checked = config.enabled === true
+    $('game-launch-game').checked = config.launchGame === true
+    $('game-engine-path').value = config.gamePath ?? ''
 
     const days = new Set(config.days ?? [])
     for (const box of document.querySelectorAll('.game-day')) {
@@ -2051,11 +3117,45 @@ function bindEvents() {
 
     return {
       game: $('game-select').value,
+      enabled: $('game-enabled').checked,
       time: $('game-time').value,
       days,
       timeoutMinutes: Number($('game-timeout').value),
-      mode: 'dry',
-      enabled: false
+      gamePath: $('game-engine-path').value.trim(),
+      launchGame: $('game-launch-game').checked,
+      mode: 'dry'
+    }
+  }
+
+  function renderGameRuns(runs = []) {
+    const container = $('game-runs')
+    if (container === null) return
+    container.replaceChildren()
+
+    const title = document.createElement('div')
+    title.className = 'item-hint'
+    title.textContent = '最近运行'
+    container.append(title)
+
+    if (runs.length === 0) {
+      const empty = document.createElement('div')
+      empty.className = 'section-note'
+      empty.textContent = '这个游戏还没有运行记录。'
+      container.append(empty)
+      return
+    }
+
+    for (const run of runs) {
+      const row = document.createElement('div')
+      row.className = 'game-run'
+      const when = new Date(run.startedAt ?? 0)
+      const label = document.createElement('span')
+      label.textContent = `${run.status ?? 'unknown'} · ${when.toLocaleString()}`
+      const detail = document.createElement('span')
+      detail.className = 'item-hint'
+      detail.textContent = `${run.mode ?? 'dry'} · ${run.runId ?? ''}`
+      row.append(label, detail)
+      container.append(row)
     }
   }
 
@@ -2080,14 +3180,38 @@ function bindEvents() {
     $('game-preview').textContent = lines.join('\n')
   }
 
-  async function refreshGameDaily() {
-    if (typeof window.pet?.gameScheduleGet !== 'function') return
+  let gameDaily = null
+
+  function currentDailyConfig() {
+    return gameDaily?.state?.games?.[$('game-select').value] ?? null
+  }
+
+  function showCurrentGame() {
+    const config = currentDailyConfig()
+    if (config !== null) fillGameForm(config)
+    void refreshGameRuns()
+  }
+
+  async function refreshGameRuns() {
+    if (typeof window.pet?.gameDailyRuns !== 'function') return
     try {
-      const result = await window.pet.gameScheduleGet()
-      fillGameForm(result?.config ?? {})
-      if (result?.error !== null && result?.error !== undefined) {
-        $('game-preview').textContent = `配置读取失败（${result.error}），已用默认值。`
-      }
+      const result = await window.pet.gameDailyRuns({ game: $('game-select').value, limit: 5 })
+      renderGameRuns(result?.runs ?? [])
+    } catch {
+      renderGameRuns([])
+    }
+  }
+
+  async function refreshGameDaily() {
+    if (typeof window.pet?.gameDailyState !== 'function') return
+    try {
+      const result = await window.pet.gameDailyState()
+      gameDaily = result
+      showCurrentGame()
+      $('game-preview').textContent =
+        typeof result?.error === 'string' && result.error !== ''
+          ? `配置读取失败（${result.error}），已用默认值。`
+          : (result?.description ?? '四个游戏都还关着，谁也不会自己动。')
     } catch (error) {
       $('game-preview').textContent = `配置读取失败：${error instanceof Error ? error.message : String(error)}`
     }
@@ -2104,18 +3228,38 @@ function bindEvents() {
     }
   })
 
-  $('game-select').addEventListener('change', renderGameDetected)
+  $('game-select').addEventListener('change', () => {
+    if (gameDaily === null) {
+      renderGameDetected()
+      return
+    }
+    showCurrentGame()
+  })
 
   $('game-save').addEventListener('click', async () => {
-    if (typeof window.pet?.gameScheduleSave !== 'function') return
+    if (typeof window.pet?.gameDailyUpdate !== 'function') return
+    const form = readGameForm()
     try {
-      const result = await window.pet.gameScheduleSave(readGameForm())
+      const result = await window.pet.gameDailyUpdate({
+        game: form.game,
+        patch: {
+          enabled: form.enabled,
+          time: form.time,
+          days: form.days,
+          timeoutMinutes: form.timeoutMinutes,
+          gamePath: form.gamePath
+        }
+      })
       if (result?.ok === true) {
-        $('game-preview').textContent = '排班已保存。模式仍是演练，真实执行没有开放。'
+        gameDaily = result
+        showCurrentGame()
+        $('game-preview').textContent = '排班已保存。真实执行前还需要应用计划任务。'
         showSaved()
-      } else {
-        renderGameResult(result)
+        return
       }
+      const lines = ['这次没有保存：']
+      for (const issue of result?.issues ?? []) lines.push(`· ${issue.message}`)
+      $('game-preview').textContent = lines.join('\n')
     } catch (error) {
       $('game-preview').textContent = `保存失败：${error instanceof Error ? error.message : String(error)}`
     }
@@ -2130,7 +3274,238 @@ function bindEvents() {
     }
   })
 
+  $('game-apply').addEventListener('click', async () => {
+    if (typeof window.pet?.gameDailyApply !== 'function') return
+    try {
+      const result = await window.pet.gameDailyApply()
+      const lines = []
+      if (result?.ok === true) {
+        lines.push(`已注册：${(result.registered ?? []).join('、') || '无'}`)
+      } else {
+        lines.push(`注册没有全部成功：期望 ${(result?.expected ?? []).join('、') || '无'}`)
+        lines.push(`当前能看到：${(result?.registered ?? []).join('、') || '无'}`)
+        if (result?.needsElevation === true) {
+          lines.push('这一步需要管理员权限。请在 UAC 弹窗里允许，或右键以管理员身份运行一次 Cyrene。')
+        }
+        for (const failure of result?.failures ?? []) {
+          if (failure.stderr !== '') lines.push(`· ${failure.game}: ${failure.stderr}`)
+        }
+      }
+      $('game-preview').textContent = lines.join('\n')
+      await refreshGameDaily()
+    } catch (error) {
+      $('game-preview').textContent = `应用失败：${error instanceof Error ? error.message : String(error)}`
+    }
+  })
+
+  $('game-task-query').addEventListener('click', async () => {
+    if (typeof window.pet?.gameDailyQuery !== 'function') return
+    try {
+      const result = await window.pet.gameDailyQuery()
+      if (result?.ok !== true) {
+        $('game-preview').textContent = `查询失败：${result?.stderr ?? '未知错误'}`
+        return
+      }
+      const names = (result.tasks ?? []).map((task) => task.name ?? task.TaskName ?? '未知任务')
+      $('game-preview').textContent =
+        names.length === 0 ? '计划任务里还没有 Cyrene 的日常。' : `已注册：${names.join('、')}`
+    } catch (error) {
+      $('game-preview').textContent = `查询失败：${error instanceof Error ? error.message : String(error)}`
+    }
+  })
+
+  $('game-disable').addEventListener('click', async () => {
+    if (typeof window.pet?.gameDailyDisable !== 'function') return
+    const game = $('game-select').value
+    if (window.confirm('关闭后会删除这个游戏的计划任务，排班本身保留。继续吗？') !== true) return
+    try {
+      const result = await window.pet.gameDailyDisable([game])
+      $('game-preview').textContent =
+        result?.ok === true
+          ? '计划任务已删除。'
+          : `删除没有完成：${result?.needsElevation === true ? '需要管理员权限' : '未知原因'}`
+      await refreshGameDaily()
+    } catch (error) {
+      $('game-preview').textContent = `删除失败：${error instanceof Error ? error.message : String(error)}`
+    }
+  })
+
+  // 游戏助手：默认关闭，连续两次独立确认后才允许生成任务计划。
+  let gameAssistantState = null
+  let gameAssistantRecordTask = null
+
+  function renderGameAssistantTasks() {
+    const container = $('game-assistant-tasks')
+    if (container === null) return
+    const tasks = (gameAssistantState?.tasks ?? []).filter(
+      (task) => task.game === 'starrail' && (task.kind === 'daily' || task.kind === 'weekly')
+    )
+    container.replaceChildren()
+    for (const task of tasks) {
+      const row = document.createElement('div')
+      row.className = 'game-assistant-task'
+
+      const text = document.createElement('div')
+      text.className = 'item-text'
+      const label = document.createElement('div')
+      label.className = 'item-label'
+      label.textContent = task.label
+      const hint = document.createElement('div')
+      hint.className = 'item-hint'
+      hint.textContent = task.note
+      text.append(label, hint)
+
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'inline-btn'
+      button.textContent = t('gameAssistant.recordButton')
+      button.addEventListener('click', () => openGameAssistantRecord(task))
+
+      row.append(text, button)
+      container.append(row)
+    }
+  }
+
+  function renderGameAssistant() {
+    if (gameAssistantState === null) return
+    const risk = gameAssistantState.risk
+
+    const stateNode = $('game-assistant-state')
+    if (risk.enabled) {
+      stateNode.textContent = t('gameAssistant.stateOn')
+    } else if (risk.confirmations === 1) {
+      stateNode.textContent = t('gameAssistant.stateOnce')
+    } else {
+      stateNode.textContent = t('gameAssistant.closed')
+    }
+
+    $('game-assistant-open').hidden = risk.enabled
+    $('game-assistant-close').hidden = !risk.enabled
+
+    const reset = new Date(gameAssistantState.nextResetAt)
+    $('game-assistant-weekly').textContent =
+      `${gameAssistantState.weeklyText} · 下次刷新 ` +
+      reset.toLocaleString('zh-CN', { hour12: false })
+
+    const list = $('game-assistant-risk-list')
+    list.replaceChildren()
+    for (const line of risk.disclosures ?? []) {
+      const item = document.createElement('li')
+      item.textContent = line
+      list.append(item)
+    }
+
+    $('game-assistant-risk-step').textContent = risk.enabled
+      ? t('gameAssistant.stateEnabled')
+      : t('gameAssistant.stepShort').replace(
+          '{n}',
+          String(Math.min(2, risk.confirmations + 1))
+        )
+    $('game-assistant-confirm').textContent =
+      risk.confirmations >= 1 ? t('gameAssistant.secondConfirm') : t('gameAssistant.confirmFirst')
+
+    renderGameAssistantTasks()
+  }
+
+  async function refreshGameAssistant() {
+    if (typeof window.pet?.gameAssistantStatus !== 'function') return
+    try {
+      gameAssistantState = await window.pet.gameAssistantStatus()
+      renderGameAssistant()
+    } catch (error) {
+      $('game-assistant-state').textContent =
+        `读取失败：${error instanceof Error ? error.message : String(error)}`
+    }
+  }
+
+  function openGameAssistantRecord(task) {
+    gameAssistantRecordTask = task
+    $('game-assistant-record-title').textContent = `${t('gameAssistant.recordPrefix')}${task.label}`
+    $('game-assistant-record').hidden = false
+    $('game-assistant-record-feedback').textContent = ''
+    $('game-assistant-points').value = String(task.points ?? 0)
+  }
+
+  $('game-assistant-open').addEventListener('click', () => {
+    $('game-assistant-risk').hidden = false
+    $('game-assistant-feedback').textContent = ''
+  })
+
+  $('game-assistant-cancel').addEventListener('click', () => {
+    $('game-assistant-risk').hidden = true
+  })
+
+  $('game-assistant-confirm').addEventListener('click', async () => {
+    if (typeof window.pet?.gameAssistantConfirm !== 'function') return
+    try {
+      const result = await window.pet.gameAssistantConfirm({
+        acknowledged: $('game-assistant-ack').checked,
+        phrase: $('game-assistant-phrase').value,
+        understandsRealRun: $('game-assistant-understand').checked
+      })
+      $('game-assistant-feedback').textContent = result.message
+      if (result.ok) {
+        await refreshGameAssistant()
+        if (gameAssistantState?.risk?.enabled === true) {
+          $('game-assistant-risk').hidden = true
+        }
+      }
+    } catch (error) {
+      $('game-assistant-feedback').textContent =
+        `确认失败：${error instanceof Error ? error.message : String(error)}`
+    }
+  })
+
+  $('game-assistant-close').addEventListener('click', async () => {
+    if (typeof window.pet?.gameAssistantDisable !== 'function') return
+    try {
+      await window.pet.gameAssistantDisable()
+      await refreshGameAssistant()
+    } catch (error) {
+      $('game-assistant-state').textContent =
+        `关闭失败：${error instanceof Error ? error.message : String(error)}`
+    }
+  })
+
+  $('game-assistant-record-cancel').addEventListener('click', () => {
+    $('game-assistant-record').hidden = true
+  })
+
+  $('game-assistant-record-save').addEventListener('click', async () => {
+    if (gameAssistantRecordTask === null) return
+    if (typeof window.pet?.gameAssistantRecord !== 'function') return
+    const task = gameAssistantRecordTask
+    const source = task.id.includes('currency')
+      ? 'currency-war'
+      : task.id.includes('divergent')
+        ? 'divergent-universe'
+        : 'other'
+
+    try {
+      const result = await window.pet.gameAssistantRecord({
+        id: `${task.id}-${Date.now()}`,
+        source,
+        difficulty: $('game-assistant-difficulty').value,
+        completed: $('game-assistant-completed').checked,
+        points: Number($('game-assistant-points').value),
+        claimed: $('game-assistant-claimed').checked,
+        recordedAt: Date.now()
+      })
+      $('game-assistant-record-feedback').textContent = result.ok
+        ? '记录好了。'
+        : result.error ?? '记录失败'
+      if (result.ok) {
+        $('game-assistant-record').hidden = true
+        await refreshGameAssistant()
+      }
+    } catch (error) {
+      $('game-assistant-record-feedback').textContent =
+        `保存失败：${error instanceof Error ? error.message : String(error)}`
+    }
+  })
+
   void refreshGameDaily()
+  void refreshGameAssistant()
   void refreshQqStatus()
   // 状态只在主进程真实变化后更新，轮询只读，不会触发重连。
   setInterval(() => {
@@ -2148,6 +3523,12 @@ function bindEvents() {
   function renderQqRuntime(info) {
     const stateNode = $('qq-runtime-state')
     const detailNode = $('qq-runtime-detail')
+    const inboundNode = $('qq-last-inbound')
+    if (inboundNode !== null) {
+      const openId = typeof info?.lastInboundOpenId === 'string' ? info.lastInboundOpenId : ''
+      inboundNode.textContent =
+        openId === '' ? t('qq.lastInboundEmpty') : t('qq.lastInboundValue').replace('{openid}', openId)
+    }
     if (stateNode === null || detailNode === null) return
     if (info === null || info === undefined || info.enabled !== true) {
       stateNode.dataset.tone = 'off'
@@ -2200,6 +3581,9 @@ function bindEvents() {
   $('qq-enabled')?.addEventListener('change', (event) => {
     void saveQq({ enabled: event.target.checked === true })
   })
+  $('qq-imitate-format')?.addEventListener('change', (event) => {
+    void saveQq({ imitateFormat: event.target.checked === true })
+  })
   $('qq-transport')?.addEventListener('change', (event) => {
     updateQqTransportVisibility()
     void saveQq({ transport: event.target.value === 'webhook' ? 'webhook' : 'gateway' })
@@ -2249,6 +3633,15 @@ function bindEvents() {
   $('qq-secret-clear')?.addEventListener('click', async () => {
     const button = $('qq-secret-clear')
     if (qqIsBusy(button)) return
+    if (
+      !confirmAction({
+        message: '清除已保存的 QQ 令牌？机器人会立刻断开，直到重新填写。',
+        strength: 'danger',
+        confirmWord: '清除'
+      })
+    ) {
+      return
+    }
     qqBusy(button, true)
     try {
       await window.pet.clearSecret(QQ_SECRET_SERVICE, QQ_SECRET_FIELD)
@@ -2286,6 +3679,39 @@ function bindEvents() {
       }
     } catch (error) {
       result.textContent = `失败：${error instanceof Error ? error.message : String(error)}`
+    } finally {
+      qqBusy(button, false)
+      refreshQqStatusSoon()
+    }
+  })
+
+  // 观察模式：把最近一条入站消息的发送者一键写进主人名单，主进程会随即重建通道。
+  $('qq-bind-owner')?.addEventListener('click', async () => {
+    if (typeof window.pet?.bindQqOwner !== 'function') return
+    const button = $('qq-bind-owner')
+    const hint = $('qq-last-inbound')
+    if (button === null) return
+    if (qqIsBusy(button)) return
+    qqBusy(button, true)
+    try {
+      const result = await window.pet.bindQqOwner()
+      if (result?.ok === true) {
+        const owners = $('qq-owners')
+        if (owners !== null && Array.isArray(result.ownerOpenIds)) {
+          owners.value = result.ownerOpenIds.join(', ')
+        }
+        if (hint !== null) hint.textContent = t('qq.bindDone')
+        showSaved()
+      } else if (result?.reason === 'no-inbound') {
+        if (hint !== null) hint.textContent = t('qq.bindNoInbound')
+      } else if (hint !== null) {
+        const detail = result?.message ?? result?.reason ?? ''
+        hint.textContent = `${t('qq.bindFailed')}${detail}`
+      }
+    } catch (error) {
+      if (hint !== null) {
+        hint.textContent = `${t('qq.bindFailed')}${error instanceof Error ? error.message : String(error)}`
+      }
     } finally {
       qqBusy(button, false)
       refreshQqStatusSoon()
@@ -2628,12 +4054,40 @@ function bindEvents() {
     void window.pet.closeSettings()
   })
 
-  // 搜索：输入即过滤，清空即恢复完整列表
+  // 右上角窗口按钮：自绘顶栏，最小化 / 最大化 / 关闭都从这里走。
+  document.getElementById('win-min')?.addEventListener('click', () => {
+    void window.pet?.minimizeSettings?.()
+  })
+  document.getElementById('win-max')?.addEventListener('click', () => {
+    void window.pet?.toggleMaximizeSettings?.()
+  })
+  document.getElementById('win-close')?.addEventListener('click', () => {
+    void window.pet?.closeSettings?.()
+  })
+
+  // 搜索：输入即过滤，清空即恢复完整列表；回车 / 上下键在命中项之间跳。
   $('settings-search').addEventListener('input', (event) => {
     runSearch(event.target.value)
   })
+  $('settings-search').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      stepSearchHit(event.shiftKey ? -1 : 1)
+      return
+    }
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      stepSearchHit(1)
+      return
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      stepSearchHit(-1)
+    }
+  })
 
   injectSectionResets()
+  injectModuleResets()
 
   // 分组恢复默认：按钮自己声明恢复哪几个顶层键
   for (const button of document.querySelectorAll('.section-reset')) {
@@ -2642,8 +4096,12 @@ function bindEvents() {
     })
   }
 
-  $('defaults-reset-all')?.addEventListener('click', () => {
+  $('reset-all-settings')?.addEventListener('click', () => {
     void resetAllSettings()
+  })
+
+  $('factory-reset')?.addEventListener('click', () => {
+    void factoryReset()
   })
 
   // Esc 先清搜索、再关窗；Ctrl/Cmd+F 聚焦搜索
@@ -2691,10 +4149,163 @@ function describeKeyRingState(diagnostic) {
   return `正常（${diagnostic?.backend ?? '未知后端'}）${signer}`
 }
 
+/** 四卡片里的时间只到分钟，不显示秒和时区，扫一眼就够。 */
+function formatStatusTime(iso) {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return '—'
+  const pad = (value) => String(value).padStart(2, '0')
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+function setStatusCard(id, value, tone, note) {
+  const node = $(id)
+  if (node === null) return
+  node.textContent = value
+  if (tone) node.dataset.tone = tone
+  const noteNode = $(`${id}-note`)
+  if (noteNode !== null) noteNode.textContent = note ?? ''
+}
+
+/**
+ * 运行状态四卡片：QQ / 记忆条数 / 今天主动次数 / 上次反思。
+ * 全部来自主进程只读快照；拿不到的项明确写「不可用」，不猜。
+ */
+async function refreshStatusCards() {
+  if ($('status-card-qq') === null) return
+  if (typeof window.pet?.statusSummary !== 'function') {
+    for (const id of ['status-card-qq', 'status-card-memory', 'status-card-proactive', 'status-card-reflection']) {
+      setStatusCard(id, t('status.cardUnknown'), 'off', '')
+    }
+    return
+  }
+  try {
+    const info = await window.pet.statusSummary()
+    const qq = info?.qq ?? {}
+    const qqReady = qq.enabled === true && qq.state === 'ready'
+    const qqLabel = qq.enabled !== true
+      ? t('status.cardQqOff')
+      : qqReady
+        ? t('status.cardQqOn')
+        : qq.state === 'error'
+          ? t('status.cardQqError')
+          : t('status.cardQqStarting')
+    setStatusCard(
+      'status-card-qq',
+      qqLabel,
+      qqReady ? 'ok' : qq.state === 'error' ? 'warn' : 'off',
+      qq.reason || (qq.observeOnly === true ? t('status.cardQqObserve') : '')
+    )
+
+    const memory = info?.memory ?? {}
+    const memoryCount = Number.isFinite(memory.count) ? memory.count : null
+    setStatusCard(
+      'status-card-memory',
+      memoryCount === null ? t('status.cardUnknown') : t('status.cardMemoryValue').replace('{count}', String(memoryCount)),
+      memoryCount === null ? 'off' : 'ok',
+      memoryCount === null
+        ? t('status.cardMemoryUnavailable')
+        : t('status.cardMemoryNote').replace('{limit}', String(memory.limit ?? '—'))
+    )
+
+    const spoken = info?.proactive?.spokenToday
+    setStatusCard(
+      'status-card-proactive',
+      Number.isFinite(spoken) ? t('status.cardProactiveValue').replace('{count}', String(spoken)) : t('status.cardUnknown'),
+      Number.isFinite(spoken) ? 'ok' : 'off',
+      Number.isFinite(spoken) ? t('status.cardProactiveNote') : ''
+    )
+
+    const lastAt = info?.reflection?.lastAt
+    setStatusCard(
+      'status-card-reflection',
+      typeof lastAt === 'string' && lastAt !== '' ? formatStatusTime(lastAt) : t('status.cardReflectionNever'),
+      typeof lastAt === 'string' && lastAt !== '' ? 'ok' : 'off',
+      typeof lastAt === 'string' && lastAt !== '' ? t('status.cardReflectionNote') : t('status.cardReflectionHint')
+    )
+
+    // 内存超过告警线时把读数挂到记忆卡片下面，不另开一张卡。
+    const guard = info?.memoryGuard
+    if (guard?.last !== null && guard?.last !== undefined) {
+      const memoryNote = $('status-card-memory-note')
+      if (memoryNote !== null) {
+        const suffix = t('status.cardMemoryPeak')
+          .replace('{rss}', String(guard.last.rssMb ?? '—'))
+          .replace('{warn}', String(guard.thresholds?.warnMb ?? '—'))
+        memoryNote.textContent = `${memoryNote.textContent}${memoryNote.textContent === '' ? '' : ' · '}${suffix}`
+      }
+    }
+  } catch (error) {
+    console.error('[settings] 运行状态读取失败', error)
+    for (const id of ['status-card-qq', 'status-card-memory', 'status-card-proactive', 'status-card-reflection']) {
+      setStatusCard(id, t('status.cardUnknown'), 'off', '')
+    }
+  }
+}
+
+/**
+ * 一键诊断：只复制脱敏后的读数，不带绝对路径、密钥或聊天正文。
+ * 用户拿这段去求助时，别人能看懂发生了什么，也不会看到私密内容。
+ */
+function describeChannelHealth(value) {
+  if (value === null || typeof value !== 'object') return '—'
+  const parts = []
+  if (value.state !== undefined) parts.push(String(value.state))
+  if (value.ok === false && value.code !== undefined) parts.push(String(value.code))
+  if (value.message !== undefined) parts.push(String(value.message))
+  return parts.length > 0 ? parts.join(' · ') : '未知'
+}
+
+async function copyDiagnostics() {
+  const button = $('diagnostics-copy')
+  const restore = () => {
+    if (button !== null) button.textContent = t('status.copyDiag')
+  }
+  try {
+    if (typeof window.pet?.statusSummary !== 'function' || typeof window.pet?.diagnostics !== 'function') {
+      throw new Error('diagnostics-unavailable')
+    }
+    const [status, diagnostics] = await Promise.all([window.pet.statusSummary(), window.pet.diagnostics()])
+    const qq = status?.qq ?? {}
+    const guard = status?.memoryGuard
+    const buildLabel = buildInfoLabel(diagnostics?.app)
+    const lines = [
+      `时间：${new Date().toISOString()}`,
+      `版本：${diagnostics?.app?.version ?? '—'}（Electron ${diagnostics?.app?.electron ?? '—'}）${buildLabel ? ` · ${buildLabel}` : ''}`,
+      `QQ：${qq.enabled === true ? qq.state ?? '—' : '未启用'}${qq.reason ? ` · ${qq.reason}` : ''}`,
+      `记忆：${status?.memory?.count ?? '—'} / ${status?.memory?.limit ?? '—'}`,
+      `今天主动：${status?.proactive?.spokenToday ?? '—'}`,
+      `上次反思：${status?.reflection?.lastAt ?? '尚未生成'}`,
+      `内存：${guard?.last?.rssMb ?? '—'} MB（告警 ${guard?.thresholds?.warnMb ?? '—'} MB / 释放 ${guard?.thresholds?.criticalMb ?? '—'} MB）`,
+      `模型：${(diagnostics?.media?.models ?? []).length} 个`,
+      `QQ 通道：${describeChannelHealth(diagnostics?.channels?.qq)}`,
+      `IPC：白名单 ${diagnostics?.ipcChannels?.listed?.length ?? '—'} / 已登记 ${diagnostics?.ipcChannels?.registered?.length ?? '—'}`
+    ]
+    await navigator.clipboard.writeText(lines.join('\n'))
+    if (button !== null) button.textContent = t('status.copied')
+    setTimeout(restore, 1600)
+  } catch (error) {
+    console.error('[settings] 复制诊断失败', error)
+    if (button !== null) button.textContent = t('status.copyFailed')
+    setTimeout(restore, 1600)
+  }
+}
+
+/** 构建标识：短提交 + 是否有未提交改动 + 构建时间；开发态没有 BUILD-INFO 时返回空串。 */
+function buildInfoLabel(app) {
+  const sha = typeof app?.sha === 'string' ? app.sha.slice(0, 7) : ''
+  if (sha === '') return ''
+  const dirty = app?.dirty === true ? '+' : ''
+  const builtAt = typeof app?.builtAt === 'string' ? app.builtAt.slice(0, 16).replace('T', ' ') : ''
+  return [sha + dirty, builtAt].filter((part) => part !== '').join(' · ')
+}
+
 async function refreshDiagnostics() {
+  // 四卡片和长表格各自独立失败：其中一项拿不到，不应拖垮另一项。
+  void refreshStatusCards()
   try {
     const info = await window.pet.diagnostics()
-    $('diag-version').textContent = `${info.app?.version ?? '—'}（Electron ${info.app?.electron ?? '—'}）`
+    const buildLabel = buildInfoLabel(info.app)
+    $('diag-version').textContent = `${info.app?.version ?? '—'}（Electron ${info.app?.electron ?? '—'}）${buildLabel ? ` · ${buildLabel}` : ''}`
 
     const size = await window.pet.getWindowSize()
     $('diag-size').textContent = size === null ? '—' : `${size.width} × ${size.height}`
@@ -2773,6 +4384,33 @@ function fillPackSelect(select, kind, currentValue, emptyLabel) {
   select.value = currentValue
 }
 
+/** 只把素材包清单读进来填选择器；导入与启停都在表情包页里做。 */
+async function loadPacks() {
+  if (typeof window.pet.listPacks !== 'function') return
+  try {
+    const result = await window.pet.listPacks()
+    packs = Array.isArray(result?.packs) ? result.packs : []
+  } catch {
+    packs = []
+  }
+  renderPackSelectors()
+}
+
+/** 设置页只显示待审核数量，真正的队列在表情包页里。 */
+async function refreshStickerPending() {
+  const badge = $('sticker-pending')
+  if (badge === null || typeof window.pet.listStickerInbox !== 'function') return
+  try {
+    const result = await window.pet.listStickerInbox()
+    const items = Array.isArray(result?.items) ? result.items : []
+    badge.hidden = items.length === 0
+    badge.textContent =
+      items.length === 0 ? '' : t('packs.pendingBadge').replace('{n}', String(items.length))
+  } catch {
+    badge.hidden = true
+  }
+}
+
 /** 重填所有来源选择器。settings 里存的是 pack:<id>:<file>，不存真实路径。 */
 function renderPackSelectors() {
   const bubble = current?.bubble ?? {}
@@ -2784,366 +4422,28 @@ function renderPackSelectors() {
   fillPackSelect($('bubble-background'), 'bubble', bubble.background ?? '', '不用底图（纯色气泡）')
   fillPackSelect($('bubble-font'), 'font', bubble.fontFamily ?? '', '内置字体栈')
   fillPackSelect($('sticker-source'), 'emoji', sticker.source ?? '', '不显示贴纸')
-  renderStickerGrid()
+
+  // 默认开启：只有显式写成 false 才关。
+  const autoApprove = $('sticker-auto-approve')
+  if (autoApprove !== null) autoApprove.checked = sticker.autoApprove !== false
 
   const slice = $('bubble-slice')
   if (slice !== null) slice.value = String(bubble.backgroundSlice ?? 12)
-}
-
-/**
- * 贴纸缩略图墙：只画当前启用包里真实存在的表情文件。
- * 选中值仍写 pack:<id>:<file>，和下拉框共用同一条写入路径。
- */
-function renderStickerGrid() {
-  const grid = $('sticker-grid')
-  const select = $('sticker-source')
-  if (grid === null || select === null) return
-  grid.replaceChildren()
-
-  const items = []
-  for (const pack of packs.filter((entry) => entry.enabled !== false)) {
-    for (const item of pack.files?.emoji ?? []) {
-      items.push({
-        value: `pack:${pack.id}:${item.file}`,
-        url: item.url,
-        name: `${pack.name || pack.id} · ${item.name}`
-      })
-    }
-  }
-
-  if (items.length === 0) {
-    const empty = document.createElement('p')
-    empty.className = 'section-note'
-    empty.textContent = t('packs.stickerEmpty')
-    grid.append(empty)
-    return
-  }
-
-  const none = document.createElement('button')
-  none.type = 'button'
-  none.className = 'asset-tile asset-tile-none'
-  none.dataset.value = ''
-  none.textContent = t('packs.stickerNone')
-  none.addEventListener('click', () => pickSticker(''))
-  grid.append(none)
-
-  for (const item of items) {
-    const tile = document.createElement('button')
-    tile.type = 'button'
-    tile.className = 'asset-tile'
-    tile.dataset.value = item.value
-    tile.title = item.name
-
-    const image = document.createElement('img')
-    image.src = item.url
-    image.alt = item.name
-    image.loading = 'lazy'
-
-    const label = document.createElement('span')
-    label.textContent = item.name
-
-    tile.append(image, label)
-    tile.addEventListener('click', () => pickSticker(item.value))
-    grid.append(tile)
-  }
-
-  syncStickerGridActive()
-}
-
-/** 高亮当前贴纸；以 select 的值为准，点击后立刻能看到反馈。 */
-function syncStickerGridActive() {
-  const grid = $('sticker-grid')
-  const select = $('sticker-source')
-  if (grid === null || select === null) return
-  for (const tile of grid.querySelectorAll('.asset-tile')) {
-    tile.classList.toggle('is-active', tile.dataset.value === select.value)
-  }
 }
 
 function pickSticker(value) {
   const select = $('sticker-source')
   if (select === null) return
   select.value = value
-  syncStickerGridActive()
   select.dispatchEvent(new Event('change'))
 }
 
-function formatPackCounts(counts = {}) {
-  const parts = []
-  if (counts.icon > 0) parts.push(`图标 ${counts.icon}`)
-  if (counts.font > 0) parts.push(`字体 ${counts.font}`)
-  if (counts.bubble > 0) parts.push(`气泡 ${counts.bubble}`)
-  if (counts.emoji > 0) parts.push(`表情 ${counts.emoji}`)
-  return parts.join('，')
-}
-
-function renderPackList() {
-  const box = $('pack-list')
-  if (box === null) return
-  box.textContent = ''
-
-  if (packs.length === 0) {
-    box.textContent = t('packs.empty')
-    return
-  }
-
-  const groups = [
-    {
-      key: 'builtin',
-      label: t('packs.sourceBuiltin'),
-      items: packs.filter((pack) => pack.source === 'builtin')
-    },
-    {
-      key: 'imported',
-      label: t('packs.sourceImported'),
-      items: packs.filter((pack) => pack.source !== 'builtin')
-    }
-  ]
-
-  const builtinCount = groups[0].items.length
-  const importedCount = groups[1].items.length
-  const brokenCount = packs.filter((pack) => pack.broken === true).length
-
-  for (const group of groups) {
-    if (group.items.length === 0) continue
-
-    const heading = document.createElement('div')
-    heading.className = 'pack-group'
-    heading.textContent = group.label
-    box.append(heading)
-
-    for (const pack of group.items) {
-      const isBuiltin = pack.source === 'builtin'
-      const row = document.createElement('div')
-      row.className = 'pack-row'
-
-      const enabled = pack.enabled !== false
-      const broken = pack.broken === true
-      const text = document.createElement('div')
-      text.className = 'pack-text'
-
-      const nameRow = document.createElement('div')
-      nameRow.className = 'pack-name-row'
-
-      const name = document.createElement('div')
-      name.className = 'pack-name'
-      name.textContent = pack.name || pack.id
-
-      const badge = document.createElement('span')
-      badge.className = `pack-badge${broken ? ' is-broken' : enabled ? '' : ' is-disabled'}`
-      badge.textContent = broken
-        ? t('packs.statusBroken')
-        : enabled ? t('packs.statusOk') : t('packs.statusDisabled')
-      nameRow.append(name, badge)
-
-      const meta = document.createElement('div')
-      meta.className = 'pack-meta'
-      const summary = formatPackCounts(pack.counts ?? {})
-      const source = pack.metaSource === 'guessed' ? t('packs.metaGuessed') : 'pack.json'
-      const size = pack.bytes > 0 ? ` · ${formatBytes(pack.bytes)}` : ''
-      const detail = broken
-        ? [t('packs.noKinds'), pack.manifestError ?? ''].filter((part) => part !== '').join(' · ')
-        : summary === '' ? t('packs.noKinds') : summary
-      meta.textContent = `${source} · ${detail}${size}`
-
-      // 第一张能显示的素材当缩略图；没有就留空，不塞占位图。
-      const thumb = pack.emoji ?? pack.icon ?? pack.bubble ?? null
-      if (thumb?.url) {
-        const image = document.createElement('img')
-        image.className = 'pack-thumb'
-        image.src = thumb.url
-        image.alt = ''
-        image.loading = 'lazy'
-        row.append(image)
-      }
-
-      text.append(nameRow, meta)
-      row.append(text)
-
-      // 内置包随应用分发，不提供停用与删除，避免做出改不动的假开关。
-      if (!isBuiltin) {
-        // 损坏包没有可用素材，启用开关没有意义；保留删除入口让用户清理。
-        if (!broken) {
-          const toggle = document.createElement('label')
-          toggle.className = 'pack-toggle'
-          const checkbox = document.createElement('input')
-          checkbox.type = 'checkbox'
-          checkbox.checked = enabled
-          checkbox.addEventListener('change', () => {
-            void setPackEnabled(pack.id, checkbox.checked)
-          })
-          toggle.append(checkbox, document.createTextNode(t('packs.enable')))
-          row.append(toggle)
-        }
-
-        const remove = document.createElement('button')
-        remove.type = 'button'
-        remove.textContent = t('packs.remove')
-        remove.addEventListener('click', () => {
-          void removePack(pack.id)
-        })
-
-        row.append(remove)
-      }
-
-      box.append(row)
-    }
-  }
-
-  const summaryRow = document.createElement('div')
-  summaryRow.className = 'pack-summary'
-  summaryRow.textContent = [
-    `${t('packs.summaryBuiltin')} ${builtinCount}`,
-    `${t('packs.summaryImported')} ${importedCount}`,
-    `${t('packs.summaryBroken')} ${brokenCount}`
-  ].join(' · ')
-  box.append(summaryRow)
-}
-
-async function setPackEnabled(packId, enabled) {
-  const status = $('packs-status')
-  if (typeof window.pet.setPackEnabled !== 'function') return
-  try {
-    const result = await window.pet.setPackEnabled(packId, enabled)
-    if (result?.ok !== true) {
-      if (status !== null) {
-        status.textContent = `${t('packs.enableFailed')} · ${result?.message ?? ''}`
-      }
-      return
-    }
-    packs = Array.isArray(result.packs) ? result.packs : packs
-    renderPackList()
-    renderPackSelectors()
-  } catch (error) {
-    if (status !== null) {
-      status.textContent = `${t('packs.enableFailed')} · ${
-        error instanceof Error ? error.message : String(error)
-      }`
-    }
-  }
-}
-
-async function refreshPacks() {
-  const status = $('packs-status')
-  if (typeof window.pet.listPacks !== 'function') {
-    if (status !== null) status.textContent = '当前版本不支持素材包'
-    return
-  }
-
-  try {
-    const result = await window.pet.listPacks()
-    packs = Array.isArray(result?.packs) ? result.packs : []
-    renderPackList()
-    renderPackSelectors()
-    if (status !== null) {
-      status.textContent =
-        result?.ok === true
-          ? packs.length === 0
-            ? '还没有导入素材包'
-            : `已导入 ${packs.length} 个`
-          : `读取失败：${result?.message ?? '未知原因'}`
-    }
-  } catch (error) {
-    if (status !== null) {
-      status.textContent = `读取失败：${error instanceof Error ? error.message : String(error)}`
-    }
-  }
-}
-
-async function importPack() {
-  const button = $('import-pack')
-  const status = $('packs-status')
-  if (typeof window.pet.importPack !== 'function') return
-
-  if (button !== null) button.disabled = true
-  if (status !== null) status.textContent = t('packs.importing')
-  try {
-    const result = await window.pet.importPack()
-    if (result?.canceled === true) {
-      if (status !== null) status.textContent = t('packs.importCanceled')
-      return
-    }
-    if (result?.ok !== true) {
-      if (status !== null) {
-        const reason = packImportReason(result?.code)
-        const detail = reason !== '' ? reason : (result?.message ?? t('packs.reasonUnknown'))
-        const details = Array.isArray(result?.details) ? result.details : []
-        const lines = details
-          .slice(0, 6)
-          .map((item, index) => {
-            const entry = typeof item?.entry === 'string' && item.entry !== '' ? `[${item.entry}] ` : ''
-            const message = typeof item?.message === 'string' ? item.message : ''
-            return `${index + 1}. ${entry}${message}`.trim()
-          })
-          .filter((line) => line !== '')
-        const more = details.length > lines.length ? `\n…（还有 ${details.length - lines.length} 条）` : ''
-        status.textContent =
-          lines.length > 0
-            ? `${t('packs.importFailed')} · ${detail}\n${lines.join('\n')}${more}`
-            : `${t('packs.importFailed')} · ${detail}`
-      }
-      return
-    }
-    packs = Array.isArray(result.packs) ? result.packs : packs
-    renderPackList()
-    renderPackSelectors()
-    if (status !== null) {
-      const name = result.pack?.name ?? result.pack?.id ?? t('packs.title')
-      status.textContent = `${t('packs.imported')}「${name}」`
-    }
-    showSaved()
-  } catch (error) {
-    if (status !== null) {
-      status.textContent = `${t('packs.importFailed')} · ${
-        error instanceof Error ? error.message : String(error)
-      }`
-    }
-  } finally {
-    if (button !== null) button.disabled = false
-  }
-}
-
-async function removePack(packId) {
-  if (typeof window.pet.removePack !== 'function') return
-  const pack = packs.find((item) => item.id === packId)
-  const summary = formatPackCounts(pack?.counts ?? {})
-  const detail = summary === '' ? '' : `（${summary}）`
-  if (
-    !confirmAction({
-      message: `删除素材包「${pack?.name || packId}」${detail}？引用它的图标、字体与贴纸会一起清空。`
-    })
-  ) {
-    return
-  }
-
-  const status = $('packs-status')
-  try {
-    const result = await window.pet.removePack(packId)
-    if (result?.ok !== true) {
-      if (status !== null) status.textContent = `删除失败：${result?.message ?? '未知原因'}`
-      return
-    }
-    packs = Array.isArray(result.packs) ? result.packs : []
-    // 主进程会顺手清掉引用，重新读一次设置，别让界面停在旧值上。
-    current = await window.pet.getSettings()
-    renderPackList()
-    renderPackSelectors()
-    if (status !== null) status.textContent = `已删除「${packId}」`
-    showSaved()
-  } catch (error) {
-    if (status !== null) {
-      status.textContent = `删除失败：${error instanceof Error ? error.message : String(error)}`
-    }
-  }
-}
-
 function bindPackEvents() {
-  $('import-pack')?.addEventListener('click', () => {
-    void importPack()
-  })
-  $('refresh-packs')?.addEventListener('click', () => {
-    void refreshPacks()
-  })
+  for (const button of document.querySelectorAll('.open-stickers')) {
+    button.addEventListener('click', () => {
+      if (typeof window.pet.openStickerWindow === 'function') void window.pet.openStickerWindow()
+    })
+  }
 
   $('icon-tray')?.addEventListener('change', (event) => {
     void patch({ icon: { tray: event.target.value } })
@@ -3160,8 +4460,10 @@ function bindPackEvents() {
     void patch({ bubble: { fontFamily: event.target.value } })
   })
   $('sticker-source')?.addEventListener('change', (event) => {
-    syncStickerGridActive()
     void patch({ sticker: { source: event.target.value } })
+  })
+  $('sticker-auto-approve')?.addEventListener('change', (event) => {
+    void patch({ sticker: { autoApprove: event.target.checked } })
   })
   $('bubble-slice')?.addEventListener('change', (event) => {
     const value = Number(event.target.value)
@@ -3174,15 +4476,17 @@ function bindPackEvents() {
 /** 外部跳转指定的面板；只接受真实存在的 data-panel，拼错就留在当前页。 */
 function showPanelIfExists(name) {
   if (typeof name !== 'string' || name === '') return
+  const target = LEGACY_PANELS[name] ?? name
   const known = [...document.querySelectorAll('.panel')].map((panel) => panel.dataset.panel)
-  if (known.includes(name)) showPanel(name)
+  if (known.includes(target)) showPanel(target)
 }
 
 async function main() {
   await loadSettings()
   bindEvents()
   // 素材包清单要等设置读完后才能对齐当前选择。
-  await refreshPacks()
+  await loadPacks()
+  await refreshStickerPending()
   // 素材清单到位后再画预览，否则底图/字体引用解析不到。
   renderBubblePreview()
 
@@ -3193,7 +4497,7 @@ async function main() {
   } else {
     const last = readLastPanel()
     if (last !== null) showPanelIfExists(last)
-    else showPanel('general')
+    else showPanel('overview')
   }
   refreshLockedState()
   // 设置窗已经开着时，主进程用事件要求切面板。

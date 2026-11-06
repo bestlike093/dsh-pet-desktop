@@ -33,6 +33,15 @@ export interface ChatChannelDeps {
     history: () => ChatTurn[]
   }
   openChatWindow: () => void
+  /**
+   * 这句话在要照片时先真拍一张。
+   * 返回 null 表示不是要照片；返回结果里只有渲染层能直接用的地址，没有图像字节。
+   */
+  takePhotoIfAsked?: (
+    text: string
+  ) => Promise<
+    { ok: boolean; reason?: string; photo?: { url: string; path: string; at: string } } | null
+  >
   showSaveDialog: (options: AnyRecord) => Promise<{ canceled: boolean; filePath?: string }>
   getDocumentsPath: () => string
   pathJoin: (...parts: string[]) => string
@@ -59,7 +68,21 @@ export function registerChatChannels(deps: ChatChannelDeps): void {
 
   register('pet:chat:send', async (_event, payload) => {
     // 与迁移前一致：payload 缺失时补空对象，交给 chatService 判空。
-    return await deps.getChatService().send((payload ?? {}) as AnyRecord)
+    const input = (payload ?? {}) as AnyRecord
+    const said = typeof input.text === 'string' ? input.text : ''
+    // 先拍再回：她嘴里的「拍好了」要配得上一张真的照片。
+    // 没拍成也不拦这句话，只是把失败原因捎回界面，由界面自己说清楚。
+    const shot =
+      typeof deps.takePhotoIfAsked === 'function' ? await deps.takePhotoIfAsked(said) : null
+
+    const result = (await deps.getChatService().send(input)) as AnyRecord | null | undefined
+    if (shot === null || shot === undefined) return result
+
+    const base =
+      result !== null && typeof result === 'object' ? result : { ok: false, reason: 'request-failed' }
+    if (base.ok !== true) return base
+    if (shot.ok === true && shot.photo !== undefined) return { ...base, photo: shot.photo }
+    return { ...base, photoFailed: String(shot.reason ?? 'capture-failed') }
   })
 
   register('pet:chat:clear', async () => {

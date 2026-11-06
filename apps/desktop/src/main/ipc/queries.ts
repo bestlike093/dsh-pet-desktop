@@ -11,6 +11,10 @@ export interface QueryChannelDeps {
   getLastRenderInfo: () => AnyRecord | null
   modelStore: AnyRecord
   packStore: AnyRecord
+  /** QQ 偷图待审核队列；只读列表，入库另走写通道。 */
+  stickerInbox: AnyRecord
+  /** 表情库：内置素材 + 用户素材包，只读。 */
+  stickerLibrary: AnyRecord
   assetLibrary: AnyRecord
   systemStats: AnyRecord
   presenceService: AnyRecord
@@ -186,6 +190,28 @@ export function registerQueryChannels(deps: QueryChannelDeps): void {
     }
   })
 
+  /** 待审核表情：QQ 偷来的图还没入库，只回文件清单与 pet-media 地址。 */
+  register('pet:sticker:inbox', async () => {
+    try {
+      return { ok: true, items: await deps.stickerInbox.list() }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      deps.log('[sticker] 读取待审核失败：', message)
+      return { ok: false, message, items: [] }
+    }
+  })
+
+  /** 表情库：内置 + 用户素材包，给预览页展示与「发到 QQ」用 id。 */
+  register('pet:sticker:library', async () => {
+    try {
+      return { ok: true, items: await deps.stickerLibrary.list() }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      deps.log('[sticker] 读取表情库失败：', message)
+      return { ok: false, message, items: [] }
+    }
+  })
+
   register('pet:chat:history', () => deps.chatService.history())
 
   /** 连接自检：发一次最小请求，只回结果，不写盘、不改设置。 */
@@ -220,7 +246,14 @@ export function registerQueryChannels(deps: QueryChannelDeps): void {
     const filtering = query !== '' || role !== '' || fromMs !== null || toMs !== null
 
     if (!filtering) {
-      return { ok: true, ...deps.memoryStore.list({ offset: payload?.offset, limit: payload?.limit }) }
+      // 层与来源在存储里就能筛，直接透传；传了不认识的值由存储自己忽略。
+      const scope = typeof payload?.scope === 'string' ? payload.scope : ''
+      const layer = typeof payload?.layer === 'string' ? payload.layer : ''
+      const options: AnyRecord = { offset: payload?.offset, limit: payload?.limit }
+      if (scope !== '') options.scope = scope
+      if (layer !== '') options.layer = layer
+      if (payload?.includeCold === false) options.includeCold = false
+      return { ok: true, ...deps.memoryStore.list(options) }
     }
 
     const keyword = query.toLowerCase()

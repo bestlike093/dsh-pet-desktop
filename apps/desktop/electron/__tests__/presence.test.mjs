@@ -92,14 +92,14 @@ describe('cleanBubbleLine', () => {
 describe('buildBubblePrompt', () => {
   it('把时间、天气、心情、记忆都交给模型', () => {
     const prompt = buildBubblePrompt({
-      nickname: '柒柒',
+      nickname: '小满',
       personaText: '你是昔涟。',
       timeCtx: timeContext(at(20, 16)),
       weather: { ok: true, city: '重庆', text: '小雨', temperature: 18 },
       mood: { label: '刚被注意到', level: 'bright', reasons: [] },
       memoryDigest: '对方今天在改设置页'
     })
-    expect(prompt.user).toContain('柒柒')
+    expect(prompt.user).toContain('小满')
     expect(prompt.user).toContain('重庆小雨')
     expect(prompt.user).toContain('18℃')
     expect(prompt.user).toContain('刚被注意到')
@@ -118,6 +118,21 @@ describe('buildBubblePrompt', () => {
   it('昵称为空时用中性称呼', () => {
     const prompt = buildBubblePrompt({ timeCtx: timeContext(at(10)), nickname: '' })
     expect(prompt.user).toContain('对方')
+  })
+
+  it('有话头到点时，只把这一件事递到眼前', () => {
+    const prompt = buildBubblePrompt({
+      timeCtx: timeContext(at(11)),
+      focusText: '明天要去面试'
+    })
+
+    expect(prompt.user).toContain('明天要去面试')
+    expect(prompt.user).toContain('还没说完')
+  })
+
+  it('没有话头时不写这一段，避免凭空捏造一件没发生的事', () => {
+    const prompt = buildBubblePrompt({ timeCtx: timeContext(at(11)) })
+    expect(prompt.user).not.toContain('还没说完')
   })
 })
 
@@ -160,7 +175,7 @@ describe('fetchWeather', () => {
 
 describe('createPresenceService', () => {
   const settings = {
-    nickname: '柒柒',
+    nickname: '小满',
     presence: { city: '重庆', useWeather: true },
     companion: { chat: { model: 'deepseek-chat' } }
   }
@@ -346,9 +361,96 @@ describe('buildBubblePrompt 的动作部分', () => {
   })
 })
 
+describe('生活细节：节日与穿搭', () => {
+  it('体感温度优先于实际温度', async () => {
+    const result = await fetchWeather({
+      fetchImpl: async () =>
+        jsonResponse({
+          current: { temperature_2m: 18.4, apparent_temperature: 14.6, weather_code: 61 }
+        })
+    })
+    expect(result).toMatchObject({ ok: true, temperature: 18, feelsLike: 15 })
+  })
+
+  it('体感温度缺失时退回实际温度', async () => {
+    const result = await fetchWeather({
+      fetchImpl: async () =>
+        jsonResponse({ current: { temperature_2m: 18.4, weather_code: 61 } })
+    })
+    expect(result.feelsLike).toBe(18)
+  })
+
+  it('提示词里同时有节日和穿搭', () => {
+    const prompt = buildBubblePrompt({
+      timeCtx: timeContext(at(20)),
+      lifestyleNote: '今天是国庆节；外面微凉，薄外套配长袖，早晚会差一点'
+    })
+    expect(prompt.user).toContain('今天是国庆节')
+    expect(prompt.user).toContain('薄外套')
+  })
+
+  it('天气失败时保留节日，只省略穿搭', async () => {
+    const service = createPresenceService({
+      getSettings: () => ({
+        nickname: '小满',
+        presence: { city: '重庆', useWeather: true },
+        companion: { chat: { model: 'deepseek-chat' } }
+      }),
+      getApiKey: async () => '',
+      fetchImpl: async () => jsonResponse({}, false, 503),
+      now: () => new Date(2026, 9, 1, 20)
+    })
+
+    const note = await service.currentLifestyleNote()
+    expect(note).toContain('国庆节')
+    expect(note).not.toContain('外面')
+  })
+
+  it('没有节日也没有温度时整段为空', async () => {
+    const service = createPresenceService({
+      getSettings: () => ({
+        nickname: '小满',
+        presence: { city: '重庆', useWeather: false },
+        companion: { chat: { model: 'deepseek-chat' } }
+      }),
+      getApiKey: async () => '',
+      now: () => at(20)
+    })
+
+    expect(await service.currentLifestyleNote()).toBe('')
+  })
+
+  it('nextLine 把节日和穿搭交给模型', async () => {
+    const requests = []
+    const service = createPresenceService({
+      getSettings: () => ({
+        nickname: '小满',
+        presence: { city: '重庆', useWeather: true },
+        companion: { chat: { model: 'deepseek-chat' } }
+      }),
+      getApiKey: async () => 'sk-test',
+      fetchImpl: async (url, init) => {
+        if (String(url).includes('open-meteo')) {
+          return jsonResponse({
+            current: { temperature_2m: 18.4, apparent_temperature: 14.6, weather_code: 0 }
+          })
+        }
+        requests.push(JSON.parse(init.body).messages)
+        return jsonResponse({ choices: [{ message: { content: '国庆快乐呀。' } }] })
+      },
+      now: () => new Date(2026, 9, 1, 20)
+    })
+
+    await service.nextLine()
+    const sent = requests[0].map((message) => message.content).join('\n')
+    expect(sent).toContain('国庆节')
+    expect(sent).toContain('薄外套')
+  })
+})
+
 describe('nextLine 透出动作', () => {
   const settings = {
-    nickname: '柒柒',
+    nickname: '小满',
     presence: { city: '重庆', useWeather: false },
     companion: { chat: { model: 'deepseek-chat' } }
   }
