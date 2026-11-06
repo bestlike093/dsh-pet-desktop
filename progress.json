@@ -1,18 +1,18 @@
 {
-  "overall": 83,
+  "overall": 84,
   "status": "active",
-  "updatedAt": "2026-11-06",
-  "next": "陪伴层候选源收尾（预约静默/起床/健康/问候锚点）与发送前 guard",
+  "updatedAt": "2026-11-07",
+  "next": "记忆衰减接进桌面壳，主动由头补齐三类来源",
   "layers": [
     { "name": "内核与契约", "value": 86 },
     { "name": "渲染与模型", "value": 89 },
     { "name": "桌面壳", "value": 86 },
     { "name": "语音", "value": 83 },
-    { "name": "聊天与记忆", "value": 78 },
+    { "name": "聊天与记忆", "value": 81 },
     { "name": "设置与引导", "value": 92 },
     { "name": "安全与加密", "value": 89 },
     { "name": "能力中心", "value": 72 },
-    { "name": "陪伴反思", "value": 78 },
+    { "name": "陪伴反思", "value": 80 },
     { "name": "打包分发", "value": 73 }
   ],
   "milestones": []

@@ -183,7 +183,7 @@ describe('memory store 按 scope 分桶', () => {
 
     expect(await store.flush()).toBe(true)
     const saved = JSON.parse(await readFile(filePath, 'utf8'))
-    expect(saved.version).toBe(4)
+    expect(saved.version).toBe(5)
     expect(saved.records.map((item) => item.scope)).toEqual(['desktop', 'qq:group:group-1'])
     // 旧记录没有 layer，读入时回落 raw，下次落盘就带上。
     expect(saved.records.map((item) => item.layer)).toEqual(['raw', 'raw'])

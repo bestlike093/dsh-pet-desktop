@@ -24,6 +24,19 @@ export function decideOutlineColor(luma) {
   return typeof luma === 'number' && luma > OUTLINE_LUMA_THRESHOLD ? 'dark' : 'light'
 }
 
+/** 描边偏好：light=固定白边（默认），dark=固定深边，auto=按亮度自己选。 */
+export const DEFAULT_OUTLINE_PREFERENCE = 'light'
+
+/**
+ * 采样结果 + 使用者偏好 → 实际要用的描边。
+ * 偏好写了不认识的值时退回 auto，不因为一个笔误就把边去掉。
+ */
+export function resolveOutlineKey(prefer, luma) {
+  const value = typeof prefer === 'string' ? prefer.trim().toLowerCase() : ''
+  if (value === 'light' || value === 'dark') return value
+  return decideOutlineColor(luma)
+}
+
 /**
  * 从画布采样轮廓亮度。
  *
@@ -145,6 +158,7 @@ export function attachAutoOutline({
   renderer = null,
   thickness = 2,
   waitFrames = 2,
+  prefer = DEFAULT_OUTLINE_PREFERENCE,
   onResult = null,
   maxAttempts = 8
 }) {
@@ -155,12 +169,15 @@ export function attachAutoOutline({
     if (settled) return
     settled = true
     if (renderer !== null && typeof renderer?.off === 'function') renderer.off('postrender', onPostRender)
+    let shown = result
     if (result.ok === true) {
-      applyOutline(canvas, OUTLINE_COLORS[decideOutlineColor(result.luma)], thickness)
+      const key = resolveOutlineKey(prefer, result.luma)
+      applyOutline(canvas, OUTLINE_COLORS[key], thickness)
+      shown = { ...result, color: key }
     }
     if (typeof onResult === 'function') {
       try {
-        onResult(result)
+        onResult(shown)
       } catch {
         // 观测回调出错不影响描边本身
       }

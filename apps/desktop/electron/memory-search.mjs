@@ -141,7 +141,8 @@ export function rankMemories(query, items, options = {}) {
         ? 1
         : Math.pow(0.5, ageDays / (Number.isFinite(halfLifeDays) && halfLifeDays > 0 ? halfLifeDays : 30))
     // 衰减只压到六成，不把旧事抹成零：重要的旧记忆仍然有机会被翻出来。
-    const recency = 0.6 + 0.4 * decay
+    // 用户钉住的条目按「长期有效」处理，不参与时间衰减。
+    const recency = doc.item?.pinned === true ? 1 : 0.6 + 0.4 * decay
 
     return { ...doc.item, _bm25: bm25, _recency: recency, _at: doc.at }
   })
@@ -164,10 +165,12 @@ export function rankMemories(query, items, options = {}) {
       // 这样「聊过很多次的事」能压过同分的新鲜事，而不会无限放大。
       const recallCount = Math.max(0, Number(item.recallCount) || 0)
       const reinforcement = 1 + Math.min(0.3, 0.12 * Math.log10(1 + recallCount))
+      // 钉住的事额外抬一点，但不至于盖过「这一句本来就更相关」。
+      const pinBoost = item.pinned === true ? 1.2 : 1
       const score =
         (hasVector
           ? normalized * (1 - vectorWeight) + vectorScore * vectorWeight
-          : normalized * item._recency) * reinforcement
+          : normalized * item._recency) * reinforcement * pinBoost
       return {
         ...item,
         score: Math.round(score * 10_000) / 10_000,

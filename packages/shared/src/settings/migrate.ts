@@ -507,6 +507,11 @@ function parseQuiet(raw: unknown, base: QuietHoursSettings): QuietHoursSettings 
   }
 }
 
+/** 描边偏好：只认三个值，其余一律退回默认（白边）。 */
+function parseOutline(raw: unknown, base: PresenceSettings['outline']): PresenceSettings['outline'] {
+  return raw === 'auto' || raw === 'light' || raw === 'dark' ? raw : base
+}
+
 function parsePresence(raw: unknown, base: PresenceSettings): PresenceSettings {
   const value = isRecord(raw) ? raw : {}
   return {
@@ -515,6 +520,7 @@ function parsePresence(raw: unknown, base: PresenceSettings): PresenceSettings {
     city: pickText(value['city'], base.city).slice(0, 20),
     useWeather: pickBoolean(value['useWeather'], base.useWeather),
     quiet: parseQuiet(value['quiet'], base.quiet),
+    outline: parseOutline(value['outline'], base.outline),
     // 识屏只认两个布尔：没写过的老设置一律当「没开、没问过」。
     screen: parseScreenRead(value['screen'], base.screen)
   }

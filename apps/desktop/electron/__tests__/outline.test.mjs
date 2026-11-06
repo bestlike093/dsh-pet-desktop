@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  DEFAULT_OUTLINE_PREFERENCE,
   OUTLINE_COLORS,
   OUTLINE_LUMA_THRESHOLD,
   applyOutline,
   decideOutlineColor,
+  resolveOutlineKey,
   sampleCanvasLuma
 } from '../renderer/outline.mjs'
 
@@ -70,5 +72,37 @@ describe('sampleCanvasLuma', () => {
     expect(sampleCanvasLuma(null)).toEqual({ ok: false, reason: 'no-canvas' })
     expect(sampleCanvasLuma({ width: 0, height: 0 })).toEqual({ ok: false, reason: 'empty-canvas' })
     expect(sampleCanvasLuma({ width: NaN, height: 10 })).toEqual({ ok: false, reason: 'empty-canvas' })
+  })
+})
+
+describe('resolveOutlineKey', () => {
+  it('默认是白边', () => {
+    expect(DEFAULT_OUTLINE_PREFERENCE).toBe('light')
+  })
+
+  it('设成白边就一直是白边，不看亮度', () => {
+    expect(resolveOutlineKey('light', 240)).toBe('light')
+    expect(resolveOutlineKey('light', 10)).toBe('light')
+  })
+
+  it('设成深边就一直是深边', () => {
+    expect(resolveOutlineKey('dark', 240)).toBe('dark')
+    expect(resolveOutlineKey('dark', 10)).toBe('dark')
+  })
+
+  it('auto 才按亮度自己挑', () => {
+    expect(resolveOutlineKey('auto', 200)).toBe('dark')
+    expect(resolveOutlineKey('auto', 40)).toBe('light')
+  })
+
+  it('写了不认识的值时退回 auto，不把边丢掉', () => {
+    expect(resolveOutlineKey('white', 200)).toBe('dark')
+    expect(resolveOutlineKey('', 40)).toBe('light')
+    expect(resolveOutlineKey(null, 40)).toBe('light')
+  })
+
+  it('大小写和空格都不影响', () => {
+    expect(resolveOutlineKey(' LIGHT ', 10)).toBe('light')
+    expect(resolveOutlineKey('Dark', 240)).toBe('dark')
   })
 })

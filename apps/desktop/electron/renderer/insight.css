@@ -501,6 +501,17 @@ button {
   border-color: var(--danger-line-strong) !important;
 }
 
+/* 钉子：钉住是「留着」，颜色不跟删除撞，只做轻微强调。 */
+.i-pin {
+  color: var(--muted, #8a8a8a);
+}
+
+.i-pin.is-on {
+  border-color: currentColor;
+  color: var(--accent, inherit);
+  font-weight: 600;
+}
+
 .i-tools {
   display: flex;
   align-items: center;

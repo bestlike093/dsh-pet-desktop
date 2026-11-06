@@ -22,7 +22,7 @@ import {
 } from '../../../../packages/core/dist/browser.js'
 import { HOST_CAPABILITY, SIZE_PROFILES, isPresenceQuietNow, mediaKindForName } from '../../../../packages/shared/dist/index.js'
 import { createMotionController } from './motion.mjs'
-import { attachAutoOutline, decideOutlineColor } from './outline.mjs'
+import { attachAutoOutline, DEFAULT_OUTLINE_PREFERENCE } from './outline.mjs'
 import { pickBubbleEmojiUrl } from './bubble-emoji.mjs'
 
 // 模块图成功建立并执行到这里，index.html 的 3 秒兜底就不会报「未启动」。
@@ -762,11 +762,13 @@ function autoOutlineStage() {
     canvas,
     renderer: null,
     thickness: Math.max(1.5, 2 * currentUiScale()),
+    // 默认白边；设置里可以改成深边或按亮度自动挑。
+    prefer: appSettings?.presence?.outline ?? DEFAULT_OUTLINE_PREFERENCE,
     onResult: (result) => {
       outlineState = result
       setMediaStatus(
         result.ok === true
-          ? `描边 ${decideOutlineColor(result.luma)} · 亮度 ${result.luma} · 取样 ${result.region}`
+          ? `描边 ${result.color} · 亮度 ${result.luma} · 取样 ${result.region}`
           : `描边未启用：${result.reason}`
       )
     }
@@ -2415,11 +2417,13 @@ function attachMotionAndOutline(app, model) {
     canvas: app.view,
     renderer: app.renderer,
     thickness: Math.max(1.5, 2 * currentUiScale()),
+    // 默认白边；设置里可以改成深边或按亮度自动挑。
+    prefer: appSettings?.presence?.outline ?? DEFAULT_OUTLINE_PREFERENCE,
     onResult: (result) => {
       outlineState = result
       setMediaStatus(
         result.ok === true
-          ? `描边 ${decideOutlineColor(result.luma)} · 亮度 ${result.luma} · 取样 ${result.region}`
+          ? `描边 ${result.color} · 亮度 ${result.luma} · 取样 ${result.region}`
           : `描边未启用：${result.reason}`
       )
     }

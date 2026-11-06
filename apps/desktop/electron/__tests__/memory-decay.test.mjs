@@ -129,7 +129,7 @@ describe('主动遗忘', () => {
     expect(await store.flush()).toBe(true)
 
     const saved = JSON.parse(await readFile(filePath, 'utf8'))
-    expect(saved.version).toBe(4)
+    expect(saved.version).toBe(5)
     expect(saved.records[0].archived).toBe(true)
 
     const reopened = makeStore(filePath)

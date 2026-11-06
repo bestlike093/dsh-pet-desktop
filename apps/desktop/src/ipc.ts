@@ -73,6 +73,8 @@ export const IPC_CHANNELS = [
   'pet:memory:facts:import',
   'pet:memory:list',
   'pet:memory:delete',
+  // 钉子：钉住的记忆不降温、不自动归档。
+  'pet:memory:pin',
   'pet:memory:export',
   'pet:memory:clear',
   // 启动前体检：模型 / 密钥 / 语音配置 / 磁盘 / Vault，一次汇总。

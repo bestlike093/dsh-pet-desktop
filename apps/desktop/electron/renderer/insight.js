@@ -604,6 +604,18 @@ function renderMemoryCount(result) {
   note.textContent = `一共 ${total} 条，已经看到 ${shown} 条${layerText}${queryText}`
 }
 
+/** 来源只做轻量回看：哪一侧、是否主动开口；不显示 openId 这类外部标识。 */
+function memorySourceLabel(source) {
+  if (source === null || typeof source !== 'object') return ''
+  if (source.channel === 'qq') {
+    return source.chatType === 'group' ? 'QQ 群' : 'QQ'
+  }
+  if (source.channel === 'desktop') {
+    return source.proactive === true ? '桌面 · 主动' : '桌面'
+  }
+  return ''
+}
+
 function renderMemoryItems() {
   const list = $('i-memory')
   list.textContent = ''
@@ -623,9 +635,20 @@ function renderMemoryItems() {
     const meta = el('div', 'i-item-meta')
     meta.appendChild(el('span', '', item.role === 'user' ? '你说的' : '她说的'))
     if (item.at) meta.appendChild(el('span', '', clockOf(item.at)))
+    const sourceText = memorySourceLabel(item.source)
+    if (sourceText !== '') meta.appendChild(el('span', '', sourceText))
     meta.appendChild(el('span', '', scopeLabel(item.scope)))
     if (item.cold === true) meta.appendChild(el('span', '', '冷存'))
+    if (item.pinned === true) meta.appendChild(el('span', 'i-badge', '已钉'))
     if (item.supersedes) meta.appendChild(el('span', '', '顶替了旧的一条'))
+
+    const pin = el('button', item.pinned === true ? 'i-pin is-on' : 'i-pin', item.pinned === true ? '取下' : '钉住')
+    pin.type = 'button'
+    pin.title = item.pinned === true ? '不再固定，恢复普通的降温与归档' : '固定住：不降温、不自动归档'
+    pin.addEventListener('click', () => {
+      void togglePin(item)
+    })
+    meta.appendChild(pin)
 
     const remove = el('button', 'i-danger', '删掉')
     remove.type = 'button'
@@ -672,6 +695,26 @@ async function deleteMemory(id) {
   const result = await window.pet.deleteInsightMemory(id)
   if (result?.ok === false) return toast(result)
   await loadMemory(true)
+  await refresh({ force: true })
+}
+
+/**
+ * 钉子：钉住后这条不再降温、不会被自动归档，检索时也会排得更靠前。
+ * 先改本地再重绘，避免整页重新拉取时闪一下。
+ */
+async function togglePin(item) {
+  if (typeof item?.id !== 'string' || item.id === '') return
+  if (typeof window.pet.pinMemory !== 'function') return
+  const next = item.pinned !== true
+  const result = await window.pet.pinMemory(item.id, next)
+  if (result?.ok === false) return toast(result)
+
+  item.pinned = next
+  if (next) {
+    item.cold = false
+    item.archived = false
+  }
+  renderMemoryItems()
   await refresh({ force: true })
 }
 

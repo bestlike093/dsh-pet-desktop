@@ -11,6 +11,8 @@ export interface MemoryChannelDeps {
   memoryStore: {
     stats: () => { available: boolean; count: number }
     remove: (id: string) => unknown
+    /** 钉住 / 取消钉住一条记忆。钉住的条目不降温、不自动归档。 */
+    setPinned?: (id: string, pinned: boolean) => unknown
     /** 清空记录；返回 Promise，调用方可 await 落盘完成。 */
     clear: () => unknown
     flush: () => Promise<void>
@@ -302,6 +304,20 @@ export function registerMemoryChannels(deps: MemoryChannelDeps): void {
     if (!deps.memoryStore.stats().available) return { ok: false, reason: 'vault-unavailable' }
     const id = typeof payload?.id === 'string' ? payload.id : ''
     return deps.memoryStore.remove(id)
+  })
+
+  /**
+   * 钉子：把一条记忆锁住，避免降温 / 自动归档。
+   * 通道只转发状态，真正的「钉住就不降温」由存储层的 refreshCold / sweep 判断。
+   */
+  register('pet:memory:pin', async (_event, payload) => {
+    if (!deps.memoryStore.stats().available) return { ok: false, reason: 'vault-unavailable' }
+    if (typeof deps.memoryStore.setPinned !== 'function') {
+      return { ok: false, reason: 'unsupported' }
+    }
+    const id = typeof payload?.id === 'string' ? payload.id : ''
+    if (id.trim() === '') return { ok: false, reason: 'bad-id' }
+    return deps.memoryStore.setPinned(id, payload?.pinned === true)
   })
 
   register('pet:memory:clear', async () => {

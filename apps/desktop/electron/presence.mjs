@@ -17,6 +17,7 @@
 const CHAT_ENDPOINT = 'https://api.deepseek.com/chat/completions'
 const WEATHER_ENDPOINT = 'https://api.open-meteo.com/v1/forecast'
 
+import { createPresenceGate } from './presence-gate.mjs'
 import { parseEmojiTag } from './companion.mjs'
 import { pickWeatherAlert, describeWeatherAlert } from './weather-alert.mjs'
 import {
@@ -500,6 +501,8 @@ export function createPresenceService(options) {
   let lastContactAt = null
   let weatherCache = null
   const recentLines = []
+  // 主动开口前的三道闸：安静时段、每日上限、连续没回应。
+  const gate = createPresenceGate({ now })
 
   function readSettings() {
     return getSettings() ?? {}
@@ -545,6 +548,7 @@ export function createPresenceService(options) {
     if (typeof line !== 'string' || line.trim() === '') return
     recentLines.push(line.trim())
     while (recentLines.length > 5) recentLines.shift()
+    gate.noteSpoken()
   }
 
   /**
@@ -556,6 +560,21 @@ export function createPresenceService(options) {
   async function nextLine(reason = 'auto', focusText = '') {
     const settings = readSettings()
     const timeCtx = timeContext(now())
+
+    const gateResult = gate.check({ settings, reason, lastContactAt })
+    if (gateResult.ok === false) {
+      return {
+        ok: false,
+        reason: gateResult.reason,
+        detail: gateResult.detail,
+        line: '',
+        source: 'gate',
+        blocked: true,
+        timeCtx,
+        mood: null,
+        weather: null
+      }
+    }
     const mood = moodSnapshot({
       now: now(),
       sessionStartedAt,

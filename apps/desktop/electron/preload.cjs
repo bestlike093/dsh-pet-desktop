@@ -97,6 +97,8 @@ contextBridge.exposeInMainWorld('pet', {
   deleteInsightMemory: (id) => ipcRenderer.invoke('pet:insight:delete-memory', { id }),
   listMemory: (options) => ipcRenderer.invoke('pet:memory:list', options),
   deleteMemory: (id) => ipcRenderer.invoke('pet:memory:delete', { id }),
+  // 钉子：钉住的记忆不降温、不自动归档；再点一次取消。
+  pinMemory: (id, pinned) => ipcRenderer.invoke('pet:memory:pin', { id, pinned }),
   exportMemory: (options) => ipcRenderer.invoke('pet:memory:export', options),
   clearMemory: () => ipcRenderer.invoke('pet:memory:clear'),
   // 启动前体检：一次拿齐模型、密钥、语音配置、磁盘与 Vault 状态。

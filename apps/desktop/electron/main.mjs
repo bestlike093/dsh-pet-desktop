@@ -949,10 +949,14 @@ const chatService = createChatService({
       }
     }
     // 关系档：生疏时只收着，亲近之后才放开；读不到就按「还没有数据」处理。
+    // 好感数值优先——上游用 50 / 75 两个门槛压档，本地 favor 同量程，直接照搬。
     let relationTier = ''
+    let relationFavor = null
     try {
       await affinity.ready()
-      relationTier = affinity.snapshot('desktop')?.levelId ?? ''
+      const bond = affinity.snapshot('desktop')
+      relationTier = bond?.levelId ?? ''
+      relationFavor = Number.isFinite(bond?.favor) ? bond.favor : null
     } catch (error) {
       log('贴近时刻读关系档失败，这一轮按没有数据处理', error)
     }
@@ -962,6 +966,7 @@ const chatService = createChatService({
       userText: typeof text === 'string' ? text : '',
       personaText: buildPersonaPrompt(settings).text,
       relationTier,
+      relationFavor,
       energy,
       at: Date.now()
     })
@@ -1625,6 +1630,24 @@ async function maybeSpeakInGroup(info) {
     const sent = await channel.replyText('group', info.openId, reply)
     if (!sent) return
     proactiveGate.markSpoke(scope, reply)
+    // 主动说出去的话也要留在记忆里：不然下次开场会像没说过一样重来。
+    // 只记她自己这一句，不替群里的人补回应；source 留着，方便回看是在哪个群说的。
+    if (memoryEnabled()) {
+      memoryStore.appendTurn(
+        'assistant',
+        reply,
+        new Date().toISOString(),
+        {
+          channel: 'qq',
+          chatType: 'group',
+          openId: info.openId,
+          msgId: info.msgId,
+          proactive: true,
+          reason: decision.reason
+        },
+        scope
+      )
+    }
     groupLastSpoken.set(scope, { text: reply, at: Date.now() })
     // 刚说完这一句：八秒内不接下一句，别在群里像复读机。
     groupManners.noteSpoken(scope)
@@ -2212,7 +2235,13 @@ async function presenceTick() {
     // 说过的话要留在记忆里。不写回去，她下次就不知道自己昨晚随口提过什么，
     // 会像没发生过一样重新开场。只记自己这一句，不替对方编回应。
     if (memoryEnabled()) {
-      memoryStore.appendTurn('assistant', result.line, new Date().toISOString(), null, 'desktop')
+      memoryStore.appendTurn(
+        'assistant',
+        result.line,
+        new Date().toISOString(),
+        { channel: 'desktop', proactive: true, reason: cueDecision.reason },
+        'desktop'
+      )
     }
     // 日程段落说完就认领，同一段今天不再重复提。
     if (opening !== null && opening.segmentId !== null) await companionService.claimAgenda()

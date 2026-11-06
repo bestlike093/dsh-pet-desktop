@@ -14,8 +14,8 @@ import { classifyMemory } from './social.mjs'
 const DEFAULT_MAX_ITEMS = 500
 const SAVE_DEBOUNCE_MS = 500
 const MAX_TEXT_CHARS = 2_000
-/** v1 没有 scope；v2 起带 scope；v3 起带 layer / cold / supersedes；v4 起带 recallCount / archived。 */
-const SCHEMA_VERSION = 4
+/** v1 没有 scope；v2 起带 scope；v3 起带 layer / cold / supersedes；v4 起带 recallCount / archived；v5 起带 pinned。 */
+const SCHEMA_VERSION = 5
 /** 四层：原文、片段、事实、经验。旧记录一律回落 raw。 */
 const LAYERS = new Set(['raw', 'episode', 'fact', 'lesson'])
 /** 只影响检索排序的半衰期；fact / lesson 是长期层，不随时间衰减。 */
@@ -213,6 +213,8 @@ export function createMemoryStore(options) {
             recallCount: Math.max(0, Math.floor(Number(item.recallCount) || 0)),
             archived: item.archived === true,
             archivedAt: typeof item.archivedAt === 'string' ? item.archivedAt : '',
+            // v5 新字段：用户手动钉住。钉住的条目不降温、不归档，检索时也排得更靠前。
+            pinned: item.pinned === true,
             supersedes: Array.isArray(item.supersedes)
               ? item.supersedes.filter((id) => typeof id === 'string').slice(0, 10)
               : [],
@@ -317,6 +319,7 @@ export function createMemoryStore(options) {
       recallCount: 0,
       archived: false,
       archivedAt: '',
+      pinned: options.pinned === true,
       supersedes: [],
       supersededBy: ''
     })
@@ -337,6 +340,8 @@ export function createMemoryStore(options) {
     let changed = false
     for (const item of records) {
       if (item.cold) continue
+      // 用户钉住的不降温，也不该被当成「很久没想起」。
+      if (item.pinned === true) continue
       // 事实和经验不降温，它们本来就是长期层。
       if (item.layer === 'fact' || item.layer === 'lesson') continue
       const stamp = Date.parse(item.at)
@@ -385,6 +390,8 @@ export function createMemoryStore(options) {
     for (const item of records) {
       if (archived.length >= limit) break
       if (item.archived) continue
+      // 钉住的是「她请我记住」的事，再怎么久都不自动归档。
+      if (item.pinned === true) continue
       if (item.layer !== 'raw' && item.layer !== 'episode') continue
       if (item.supersededBy !== '') continue
       if ((Number(item.recallCount) || 0) > ARCHIVE_RECALL_LIMIT) continue
@@ -420,7 +427,31 @@ export function createMemoryStore(options) {
 
 
   /**
-   * 记一条事实，并把同 scope 里被它取代的旧事实标成过期。
+   * 钉子：用户亲手把一条记忆锁住。
+   *
+   * 钉住的条目不再变冷、不会被自动归档，检索时也享受「不衰减 + 轻微加权」；
+   * 取消钉子后回到普通条目，下一次 refreshCold / sweep 会按原规则处理。
+   */
+  function setPinned(id, pinned) {
+    const key = typeof id === 'string' ? id.trim() : ''
+    const item = records.find((entry) => entry.id === key)
+    if (item === undefined) return { ok: false, reason: 'not-found' }
+    const next = pinned === true
+    item.pinned = next
+    // 钉住时顺手解冻：用户显然希望它回到日常检索里。
+    if (next) {
+      item.cold = false
+      item.archived = false
+      item.archivedAt = ''
+    }
+    dirty = true
+    scheduleSave()
+    return { ok: true, id: key, pinned: next }
+  }
+
+
+  /**
+   * 记住一件新事实，并顺手处理被它取代的旧事实。
    *
    * 旧记录留在磁盘上，只是默认检索不再返回：用户想翻旧账时还能看见，
    * 平时不会被「过时的她」影响判断。
@@ -463,6 +494,7 @@ export function createMemoryStore(options) {
       recallCount: 0,
       archived: false,
       archivedAt: '',
+      pinned: options.pinned === true,
       supersedes: superseded,
       supersededBy: ''
     })
@@ -681,11 +713,13 @@ export function createMemoryStore(options) {
     const layers = { raw: 0, episode: 0, fact: 0, lesson: 0 }
     let cold = 0
     let archived = 0
+    let pinned = 0
     for (const item of records) {
       scopes[item.scope] = (scopes[item.scope] ?? 0) + 1
       layers[item.layer] = (layers[item.layer] ?? 0) + 1
       if (item.cold) cold += 1
       if (item.archived) archived += 1
+      if (item.pinned === true) pinned += 1
     }
     return {
       available,
@@ -697,7 +731,8 @@ export function createMemoryStore(options) {
       scopes,
       layers,
       cold,
-      archived
+      archived,
+      pinned
     }
   }
 
@@ -718,6 +753,7 @@ export function createMemoryStore(options) {
     rememberFact,
     refreshCold,
     setCold,
+    setPinned,
     sweep,
     setArchived,
     recent,

@@ -139,6 +139,23 @@ export function narrowLevel(level, cap = 'deep') {
 }
 
 /**
+ * 好感分档：上游 ccb 用 CCB_AFFECTION_MIN = 50 / CCB_AFFECTION_DEEP = 75，
+ * 50 以下岔开、50–74 擦边、75 以上放开。本地 favor 也是 0–100，
+ * 就照这两个数压档，不另造一套边界。
+ */
+export const AFFECTION_EDGE = 50
+export const AFFECTION_DEEP = 75
+
+/** 好感默认压到哪一档；拿不到数值时不压。 */
+export function capByAffection(favor) {
+  const value = Number(favor)
+  if (!Number.isFinite(value)) return 'deep'
+  if (value >= AFFECTION_DEEP) return 'deep'
+  if (value >= AFFECTION_EDGE) return 'flirt'
+  return 'repress'
+}
+
+/**
  * 红线分两层。
  *
  * 硬底线两版都拦：未成年、非自愿。
@@ -539,10 +556,17 @@ export function createIntimacyGate(options = {}) {
       return closed('safety')
     }
 
-    // 关系档：生疏以上才谈得上靠近；眼熟只到擦边，亲近之后才放开。
+    // 关系档：还没熟起来时只给最浅的一档，不把整条关掉——
+    // 上游 ccb 也是「好感不够压回第一档」，不是不许靠近。
+    // 有 favor 数值就用它（50/75 与上游同门槛），否则退回档位名判断。
     const tier = typeof input.relationTier === 'string' ? input.relationTier : ''
-    if (tier === 'distant' || tier === 'guarded') return closed('too-far')
-    const tierCap = tier === 'familiar' ? 'flirt' : 'deep'
+    const tierCap = Number.isFinite(input.relationFavor)
+      ? capByAffection(input.relationFavor)
+      : tier === 'distant'
+        ? 'repress'
+        : tier === 'guarded' || tier === 'familiar'
+          ? 'flirt'
+          : 'deep'
 
     const limits = limitsOf(settings)
 

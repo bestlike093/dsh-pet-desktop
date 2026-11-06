@@ -451,7 +451,8 @@ describe('生活细节：节日与穿搭', () => {
 describe('nextLine 透出动作', () => {
   const settings = {
     nickname: '小满',
-    presence: { city: '重庆', useWeather: false },
+    // 这组测试看的是动作标记解析，固定凌晨时间，所以把安静时段关掉。
+    presence: { city: '重庆', useWeather: false, quietHours: { enabled: false } },
     companion: { chat: { model: 'deepseek-chat' } }
   }
 

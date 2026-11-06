@@ -226,7 +226,7 @@ describe('统计与落盘', () => {
     expect(await store.flush()).toBe(true)
 
     const saved = JSON.parse(await readFile(filePath, 'utf8'))
-    expect(saved.version).toBe(4)
+    expect(saved.version).toBe(5)
     expect(saved.records.map((item) => item.layer)).toEqual(['raw', 'fact', 'lesson'])
     expect(saved.records.every((item) => Array.isArray(item.supersedes))).toBe(true)
 

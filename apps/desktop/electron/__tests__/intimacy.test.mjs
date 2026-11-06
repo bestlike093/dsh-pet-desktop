@@ -3,6 +3,7 @@ import {
   ENERGY_COST,
   INITIATIVE_MIN,
   SAFE_LINES,
+  capByAffection,
   capTone,
   createIntimacyGate,
   initiativeOf,
@@ -414,12 +415,11 @@ describe('贴近时刻', () => {
     )
   })
 
-  it('关系还眼熟时只到擦边，生疏时不靠近', () => {
+  it('关系档决定最深到哪：生疏只并肩，眼熟只擦边', () => {
     const cold = createIntimacyGate({ now: () => at(15) })
     expect(
       cold.check({ settings: onSettings(), scope: 'desktop', userText: '抱抱', relationTier: 'distant' })
-        .reason
-    ).toBe('too-far')
+    ).toMatchObject({ open: true, level: 'repress', tone: 'soft' })
 
     const current = at(15)
     const familiar = createIntimacyGate({ now: () => current })
@@ -433,6 +433,31 @@ describe('贴近时刻', () => {
     familiar.noteTurn(current)
     expect(
       familiar.check({ settings: onSettings(), scope: 'desktop', relationTier: 'familiar' }).level
+    ).toBe('flirt')
+  })
+
+  it('好感数值按上游的 50 / 75 两道门槛压档', () => {
+    expect(capByAffection(30)).toBe('repress')
+    expect(capByAffection(50)).toBe('flirt')
+    expect(capByAffection(74)).toBe('flirt')
+    expect(capByAffection(75)).toBe('deep')
+    expect(capByAffection(Number.NaN)).toBe('deep')
+
+    const current = at(15)
+    const gate = createIntimacyGate({ now: () => current })
+    gate.check({
+      settings: onSettings(),
+      scope: 'desktop',
+      userText: '抱抱',
+      relationTier: 'close',
+      relationFavor: 60
+    })
+    gate.noteTurn(current)
+    gate.noteTurn(current)
+    // 关系名义上很近，但好感只有 60，压回擦边。
+    expect(
+      gate.check({ settings: onSettings(), scope: 'desktop', relationTier: 'close', relationFavor: 60 })
+        .level
     ).toBe('flirt')
   })
 
