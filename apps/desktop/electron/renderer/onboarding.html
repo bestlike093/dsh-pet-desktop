@@ -18,6 +18,7 @@
           <span class="dot is-active"></span>
           <span class="dot"></span>
           <span class="dot"></span>
+          <span class="dot"></span>
         </div>
         <button type="button" class="link" id="close" data-i18n="onboard.later">稍后再说</button>
       </header>
@@ -83,10 +84,33 @@
           <p class="note" data-i18n="onboard.quietNote">跨零点也可以，比如 22:00 → 08:00。</p>
         </section>
 
-        <!-- 3. 密钥 -->
+        <!-- 3. 立绘 -->
         <section class="step">
-          <h1 data-i18n="onboard.step3Title">用自己的钥匙</h1>
+          <h1 data-i18n="onboard.step3Title">先挑一个样子</h1>
           <p class="lead" data-i18n="onboard.step3Lead">
+            第一眼看到的就是她。可以先留着随包的立绘，也可以现在把自己准备好的模型导进来，之后在设置里随时能换。
+          </p>
+
+          <div class="row stand-actions">
+            <button type="button" class="link" id="stand-import" data-i18n="onboard.standImport">
+              导入一个模型
+            </button>
+            <button type="button" class="link" id="stand-folder" data-i18n="onboard.standFolder">
+              打开模型文件夹
+            </button>
+          </div>
+
+          <div class="stand-list" id="stand-list"></div>
+
+          <p class="note" id="stand-status" data-i18n="onboard.standNote">
+            模型只留在本机。卸载重装、换版本都不会丢。
+          </p>
+        </section>
+
+        <!-- 4. 密钥 -->
+        <section class="step">
+          <h1 data-i18n="onboard.step4Title">用自己的钥匙</h1>
+          <p class="lead" data-i18n="onboard.step4Lead">
             余额查询这类联网功能，需要你自己的 DeepSeek API Key。没有也能正常用，只是这些功能会保持关闭。
           </p>
           <div class="secret">

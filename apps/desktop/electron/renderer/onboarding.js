@@ -1,6 +1,6 @@
 const SERVICE = 'deepseek'
 const FIELD = 'api_key'
-const TOTAL = 3
+const TOTAL = 4
 
 const $ = (id) => document.getElementById(id)
 
@@ -22,6 +22,7 @@ async function load() {
   $('quiet-end').value = quiet.end ?? '08:00'
 
   await refreshKey()
+  await refreshStands()
 }
 
 /** 只发增量，其余字段原样带回去。 */
@@ -51,6 +52,77 @@ function render() {
     node.classList.toggle('is-active', index < step)
   })
   $('next').textContent = step === TOTAL ? '完成' : '下一步'
+}
+
+/**
+ * 立绘：把本机已有的模型列出来，点一下就能切过去。
+ * 没有模型时不塞假入口，直接说明先用随包立绘。
+ */
+async function refreshStands() {
+  const list = $('stand-list')
+  if (list === null) return
+  list.textContent = ''
+
+  let models = []
+  try {
+    const result = await window.pet.listModels()
+    models = Array.isArray(result) ? result : []
+  } catch {
+    return
+  }
+
+  if (models.length === 0) {
+    const empty = document.createElement('p')
+    empty.className = 'note'
+    empty.textContent = '还没有导入模型，先用随包立绘。'
+    list.appendChild(empty)
+    return
+  }
+
+  for (const model of models) {
+    const id = typeof model?.id === 'string' ? model.id : ''
+    if (id === '') continue
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'link'
+    button.textContent =
+      typeof model?.name === 'string' && model.name !== '' ? model.name : id
+    button.addEventListener('click', () => void pickStand(id, button))
+    list.appendChild(button)
+  }
+}
+
+async function pickStand(id, button) {
+  button.disabled = true
+  const status = $('stand-status')
+  try {
+    await window.pet.setActiveModel(id)
+    if (status !== null) status.textContent = '已经换成这个了，回去就能看到。'
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (status !== null) status.textContent = `没能切换：${message}`
+  } finally {
+    button.disabled = false
+  }
+}
+
+async function importStand() {
+  const status = $('stand-status')
+  try {
+    const imported = await window.pet.importModel('zip')
+    const model = imported?.model ?? imported
+    const id = typeof model?.id === 'string' ? model.id : ''
+    if (id === '') {
+      if (status !== null) status.textContent = '没有选中文件，先留着现在的样子。'
+      return
+    }
+    await window.pet.setActiveModel(id)
+    await refreshStands()
+    if (status !== null) status.textContent = '导入好了，已经换上。'
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (status !== null) status.textContent = `没能导入：${message}`
+  }
 }
 
 async function saveKeyIfAny() {
@@ -83,6 +155,9 @@ async function saveStep() {
     })
     return
   }
+
+  // 第 3 步是立绘，点中即生效，没有要额外保存的字段。
+  if (step === 3) return
 
   await saveKeyIfAny()
 }
@@ -129,6 +204,10 @@ function skip() {
 $('next').addEventListener('click', () => void next())
 $('skip').addEventListener('click', skip)
 $('close').addEventListener('click', () => window.close())
+$('stand-import')?.addEventListener('click', () => void importStand())
+$('stand-folder')?.addEventListener('click', () => {
+  void window.pet.openModelsFolder?.()
+})
 
 // 换机恢复：入口默认收起，点了才展开，避免吓到第一次用的人。
 // 成功时主进程会自己重启，这里只负责把状态说清楚。
