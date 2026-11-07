@@ -6,7 +6,7 @@
  * 安静时段对手动触发同样生效；另外两条只拦自动开口。
  */
 
-export const DEFAULT_QUIET = { enabled: true, start: '23:00', end: '07:00' }
+export const DEFAULT_QUIET = { enabled: true, start: '23:00', end: '08:00' }
 export const DEFAULT_DAILY_CAP = 6
 export const DEFAULT_SILENCE_DAYS = 3
 
@@ -35,13 +35,31 @@ export function dayKey(now = new Date()) {
  */
 export function inQuietHours(now = new Date(), quiet = DEFAULT_QUIET) {
   if (quiet === null || quiet?.enabled === false) return false
-  const start = parseClock(quiet?.start) ?? parseClock(DEFAULT_QUIET.start)
-  const end = parseClock(quiet?.end) ?? parseClock(DEFAULT_QUIET.end)
+  const start = parseClock(quiet?.start ?? quiet?.from) ?? parseClock(DEFAULT_QUIET.start)
+  const end = parseClock(quiet?.end ?? quiet?.to) ?? parseClock(DEFAULT_QUIET.end)
   if (start === null || end === null || start === end) return false
   const current = now.getHours() * 60 + now.getMinutes()
   return start < end
     ? current >= start && current < end
     : current >= start || current < end
+}
+
+/**
+ * 设置页的「夜间不扰」用的是 from/to，闸门内部统一成 start/end。
+ *
+ * 它是唯一的时段来源：调度层和闸门读同一份设置，改了立刻一致。
+ */
+export function quietWindow(presence = {}) {
+  const quiet = presence?.quiet
+  if (quiet === null || typeof quiet !== 'object') {
+    return { ...DEFAULT_QUIET, mode: 'urgentOnly' }
+  }
+  return {
+    enabled: quiet.enabled !== false,
+    start: typeof quiet.from === 'string' ? quiet.from : DEFAULT_QUIET.start,
+    end: typeof quiet.to === 'string' ? quiet.to : DEFAULT_QUIET.end,
+    mode: typeof quiet.mode === 'string' ? quiet.mode : 'urgentOnly'
+  }
 }
 
 export function createPresenceGate({ now = () => new Date(), initial = null } = {}) {
@@ -73,7 +91,9 @@ export function createPresenceGate({ now = () => new Date(), initial = null } = 
     rollDay(nowDate)
     const presence = settings?.presence ?? {}
 
-    if (inQuietHours(nowDate, presence.quietHours ?? DEFAULT_QUIET)) {
+    // 时段只认设置页的「夜间不扰」；降频模式仍要说话，间隔由调度层拉长。
+    const quiet = quietWindow(presence)
+    if (quiet.mode !== 'reduce' && inQuietHours(nowDate, quiet)) {
       return { ok: false, reason: 'quiet-hours', detail: '这个点她已经休息了' }
     }
 

@@ -452,7 +452,7 @@ describe('nextLine 透出动作', () => {
   const settings = {
     nickname: '小满',
     // 这组测试看的是动作标记解析，固定凌晨时间，所以把安静时段关掉。
-    presence: { city: '重庆', useWeather: false, quietHours: { enabled: false } },
+    presence: { city: '重庆', useWeather: false, quiet: { enabled: false } },
     companion: { chat: { model: 'deepseek-chat' } }
   }
 
@@ -499,7 +499,7 @@ describe('nextLine 透出动作', () => {
 
 describe('开口的账跨重启', () => {
   const settings = {
-    presence: { city: '重庆', useWeather: false, quietHours: { enabled: false }, dailyCap: 2 }
+    presence: { city: '重庆', useWeather: false, quiet: { enabled: false }, dailyCap: 2 }
   }
 
   it('说过一句就把时间和次数写出去', async () => {

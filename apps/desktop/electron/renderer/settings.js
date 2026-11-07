@@ -525,6 +525,7 @@ const DEFAULT_PATCH = {
     quiet: { enabled: true, from: '23:00', to: '08:00', mode: 'urgentOnly', hideHud: false },
     dailyCap: 6,
     silenceDays: 3,
+    outline: 'light',
     screen: { enabled: false, consentAsked: false }
   },
   balance: { threshold: 20, intervalMinutes: 30 },
@@ -605,6 +606,7 @@ const MODULE_RESETS = [
       'hudAlpha',
       'hudScale',
       'hudFontScale',
+      'presence.outline',
       'companion.persona'
     ]
   },
@@ -1092,6 +1094,10 @@ async function loadSettings() {
       )
   $('poseEverySeconds').value = String(poseEvery)
 
+  // 描边：只认三个值，其余按白边显示，和主进程的迁移保持一致。
+  const outline = current.presence?.outline
+  $('presence-outline').value = outline === 'dark' || outline === 'auto' ? outline : 'light'
+
   // 气泡
   const bubble = current.bubble ?? {}
   $('bubble-mode').value = bubble.mode ?? 'rotate'
@@ -1157,8 +1163,8 @@ async function loadSettings() {
   $('presence-ai-enabled').checked = presence.aiEnabled === true
   $('presence-interval').value = String(presence.intervalMinutes ?? 45)
   $('presence-city').value = presence.city ?? ''
-  $('presence-daily-cap').value = String(presence.dailyCap ?? 6)
-  $('presence-silence-days').value = String(presence.silenceDays ?? 3)
+  $('presence-daily-cap').value = String(presence.dailyCap ?? 8)
+  $('presence-silence-days').value = String(presence.silenceDays ?? 7)
   // 默认开着天气：这是「结合此刻」里最直观的一项。
   $('presence-weather').checked = presence.useWeather !== false
   // 识屏默认关；只有用户自己在这里打开过才会读。
@@ -2177,6 +2183,10 @@ function bindEvents() {
     void patch({ poseEverySeconds: value })
   })
 
+  $('presence-outline').addEventListener('change', () => {
+    void patch({ presence: { outline: $('presence-outline').value } })
+  })
+
   $('edgeSnap').addEventListener('change', (event) => {
     void patch({ window: { edgeSnap: event.target.checked } })
   })
@@ -2626,7 +2636,7 @@ function bindEvents() {
   // 0 表示不限次数；填错或留空时按默认值存，避免把闸门关死又不自知。
   $('presence-daily-cap').addEventListener('change', () => {
     const raw = Number($('presence-daily-cap').value)
-    const value = Number.isFinite(raw) ? Math.min(Math.max(Math.trunc(raw), 0), 50) : 6
+    const value = Number.isFinite(raw) ? Math.min(Math.max(Math.trunc(raw), 0), 50) : 8
     $('presence-daily-cap').value = String(value)
     void patch({ presence: { dailyCap: value } })
   })
@@ -2634,7 +2644,7 @@ function bindEvents() {
   // 0 表示一直等下去；其余按天算，超过这个天数就不再自动开口。
   $('presence-silence-days').addEventListener('change', () => {
     const raw = Number($('presence-silence-days').value)
-    const value = Number.isFinite(raw) ? Math.min(Math.max(Math.trunc(raw), 0), 365) : 3
+    const value = Number.isFinite(raw) ? Math.min(Math.max(Math.trunc(raw), 0), 365) : 7
     $('presence-silence-days').value = String(value)
     void patch({ presence: { silenceDays: value } })
   })

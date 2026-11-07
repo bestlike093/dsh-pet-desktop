@@ -503,7 +503,7 @@ button {
 
 /* 钉子：钉住是「留着」，颜色不跟删除撞，只做轻微强调。 */
 .i-pin {
-  color: var(--muted, #8a8a8a);
+  color: var(--muted);
 }
 
 .i-pin.is-on {

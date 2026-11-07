@@ -33,8 +33,9 @@ describe('inQuietHours', () => {
     expect(inQuietHours(at(6, 59), DEFAULT_QUIET)).toBe(true)
   })
 
-  it('七点整就放行，边界不吞人', () => {
-    expect(inQuietHours(at(7, 0), DEFAULT_QUIET)).toBe(false)
+  it('到点就放行，边界不吞人', () => {
+    expect(inQuietHours(at(7, 30), DEFAULT_QUIET)).toBe(true)
+    expect(inQuietHours(at(8, 0), DEFAULT_QUIET)).toBe(false)
     expect(inQuietHours(at(12, 0), DEFAULT_QUIET)).toBe(false)
   })
 
@@ -60,6 +61,27 @@ describe('createPresenceGate', () => {
     expect(result.ok).toBe(false)
     expect(result.reason).toBe('quiet-hours')
     expect(result.detail).toContain('休息')
+  })
+
+  it('时段跟着设置页的夜间不扰走', () => {
+    const gate = createPresenceGate({ now: () => at(22, 30) })
+    const quiet = { enabled: true, from: '22:00', to: '08:00', mode: 'urgentOnly' }
+    expect(gate.check({ reason: 'auto', settings: { presence: { quiet } } }).reason).toBe(
+      'quiet-hours'
+    )
+    expect(
+      gate.check({ reason: 'auto', settings: { presence: { quiet: { ...quiet, enabled: false } } } })
+        .ok
+    ).toBe(true)
+  })
+
+  it('降频模式不拦，间隔交给调度层拉长', () => {
+    const gate = createPresenceGate({ now: () => at(23, 30) })
+    const result = gate.check({
+      reason: 'auto',
+      settings: { presence: { quiet: { enabled: true, from: '23:00', to: '08:00', mode: 'reduce' } } }
+    })
+    expect(result.ok).toBe(true)
   })
 
   it('手动不受每日上限影响', () => {

@@ -454,7 +454,7 @@ export const DEFAULT_SETTINGS: SettingsV2 = {
     useWeather: true,
     // 默认开启：23:00–08:00 只关搭话、保留定时提醒。
     quiet: { enabled: true, from: '23:00', to: '08:00', mode: 'urgentOnly', hideHud: false },
-    // 三条闸的默认值：一天最多 6 次，连着 3 天没互动就不再主动开口。
+    // 三条闸的默认值：一天最多 8 次，连着 7 天没互动就不再主动开口。
     dailyCap: 6,
     silenceDays: 3,
     // 立绘描边默认白边：浅色桌面也要看得清轮廓。

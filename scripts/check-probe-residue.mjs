@@ -14,7 +14,16 @@ import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const SELF = 'scripts/check-probe-residue.mjs'
-const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', '.vite', 'coverage'])
+// 构建产物与导出暂存区不参与判定：它们整份拷贝源码，留着上一轮的守卫脚本。
+const SKIP_DIRS = new Set([
+  'node_modules',
+  'dist',
+  'dist-public',
+  'tmp',
+  '.git',
+  '.vite',
+  'coverage'
+])
 const SKIP_FILES = new Set([SELF])
 
 const NAME_PATTERN = /__probe__|probe-report|probe-residue/i

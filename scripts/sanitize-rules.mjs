@@ -50,7 +50,7 @@ export const TEXT_EXT = new Set([
 
 export const SKIP_DIRS = new Set([
   'node_modules', '.git', 'dist', 'build', 'coverage',
-  '.tmp', 'assets', 'storages', 'runtime',
+  '.tmp', 'tmp', 'dist-public', 'assets', 'storages', 'runtime',
 ]);
 
 /**
@@ -65,6 +65,8 @@ export const SKIP_FILES = new Set([
   'test-fake-names.mjs',
   // 本机运行时上下文：真值只留本地，仓库用 RUNTIME-CONTEXT.example.md
   'RUNTIME-CONTEXT.md',
+  // 脱敏规则表自身：必然写着真实工作区名与假 key 字面量，属自扫豁免。
+  'export-public.mjs',
   // 定时任务写的运行日志：含本机路径与收件邮箱，*.log 已被 .gitignore 忽略，不进产物。
   // 豁免是为了不让每天 9 点的简报任务把 verify 打红；若将来要连工作树一起干净，应把日志输出改到临时目录。
   'daily-brief.log',

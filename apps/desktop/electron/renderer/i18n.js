@@ -469,6 +469,11 @@
     'general.poseEvery60': '60 秒',
     'general.poseEvery120': '120 秒',
     'general.poseEvery300': '300 秒',
+    'general.outline': '描边',
+    'general.outlineHint': '浅色桌面上白边更清楚；深色桌面可以换深边',
+    'general.outlineLight': '白边',
+    'general.outlineDark': '深边',
+    'general.outlineAuto': '按亮度自动',
 
     'general.size': '角色尺寸',
     'general.profile': '比例',
@@ -1491,6 +1496,11 @@
     'general.poseEvery60': '60 seconds',
     'general.poseEvery120': '120 seconds',
     'general.poseEvery300': '300 seconds',
+    'general.outline': 'Outline',
+    'general.outlineHint': 'A light outline reads better on pale desktops; switch to dark on dark ones',
+    'general.outlineLight': 'Light',
+    'general.outlineDark': 'Dark',
+    'general.outlineAuto': 'Match brightness',
 
     'general.size': 'Size',
     'general.profile': 'Aspect',
