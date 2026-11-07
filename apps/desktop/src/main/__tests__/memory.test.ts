@@ -52,6 +52,19 @@ describe('buildMemoryDigest', () => {
     ).toBe('你：x')
   })
 
+  it('有时间的条目带上「前天」这种人话，没有时间的不加前缀', () => {
+    expect(
+      buildMemoryDigest({
+        ...base,
+        count: 2,
+        items: [
+          { role: 'user', text: '要交的东西做完了', when: '前天 21:40' },
+          { role: 'assistant', text: '那就好' }
+        ]
+      })
+    ).toBe(['前天 21:40 用户：要交的东西做完了', '你：那就好'].join('\n'))
+  })
+
   it('空 items 不抛', () => {
     expect(buildMemoryDigest({ ...base, count: 0, items: [] })).toBe('')
   })

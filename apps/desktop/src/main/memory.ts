@@ -8,6 +8,8 @@ import { STOP_BIGRAMS } from '@pet/shared'
 export interface MemoryTurn {
   role: string
   text: string
+  /** 「前天 21:40」这种人话时间；由调用方算好，存储层不认识日期。 */
+  when?: string
 }
 
 export interface MemoryDigestInput {
@@ -124,5 +126,11 @@ export function buildMemoryDigest(input: MemoryDigestInput): string {
   const limit = Number.isInteger(requested) && requested > 0 ? Math.floor(requested) : DEFAULT_LIMIT
   const picked =
     typeof input.query === 'string' ? pickRelevant(older, input.query, limit) : older
-  return picked.map((item) => `${item.role === 'user' ? '用户' : '你'}：${item.text}`).join('\n')
+  return picked
+    .map((item) => {
+      // 记得「前天」比记得「11 月 5 日」更像人。没有时间的旧记录不加前缀。
+      const when = typeof item.when === 'string' && item.when !== '' ? `${item.when} ` : ''
+      return `${when}${item.role === 'user' ? '用户' : '你'}：${item.text}`
+    })
+    .join('\n')
 }

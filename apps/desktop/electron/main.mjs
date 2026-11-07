@@ -80,6 +80,7 @@ import {
   proactiveLimitsFromPresence
 } from './proactive.mjs'
 import { planMemoryRecall } from './memory-intent.mjs'
+import { humanTime } from './human-time.mjs'
 import { importHistoryCandidates } from './history-import.mjs'
 import { burstDelay, splitReply } from './reply-split.mjs'
 import { createGroupReplyGate } from './group-reply-gate.mjs'
@@ -914,7 +915,12 @@ const chatService = createChatService({
     const recalled = plan.preferRecent
       ? []
       : memoryStore.search(query, { scope, limit: plan.memoryCount, vectorScores })
-    const items = recalled.length > 0 ? recalled : memoryStore.recent(plan.memoryCount, scope)
+    const picked = recalled.length > 0 ? recalled : memoryStore.recent(plan.memoryCount, scope)
+    // 记忆进提示词时也带上「前天」这种说法：她知道是哪一天，而不是一串时间戳。
+    const items = picked.map((item) => {
+      const when = humanTime(item.at)
+      return when === '' ? item : { ...item, when }
+    })
     return buildMemoryDigest({
       enabled: memoryEnabled(),
       ...memoryStore.stats(),

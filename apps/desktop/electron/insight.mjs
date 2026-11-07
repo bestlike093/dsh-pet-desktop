@@ -7,6 +7,8 @@
  *
  * 500ms 内的重复请求共用同一份快照，避免轮询时反复扫内存。
  */
+import { humanTime } from './human-time.mjs'
+
 const DEFAULT_CACHE_TTL_MS = 500
 const MAX_MEMORY_PAGE = 20
 const SESSION_SCAN_COUNT = 200
@@ -29,6 +31,13 @@ function pageNumber(value, fallback, min, max) {
   const n = Number(value)
   if (!Number.isFinite(n)) return fallback
   return Math.min(Math.max(Math.floor(n), min), max)
+}
+
+/** 给条目补一句人话时间；没时间的原样返回。 */
+function withHumanTime(item) {
+  if (item === null || typeof item !== 'object') return item
+  const atText = humanTime(item.at ?? item.createdAt)
+  return atText === '' ? item : { ...item, atText }
 }
 
 export function createInsightService(options = {}) {
@@ -169,8 +178,8 @@ export function createInsightService(options = {}) {
     return {
       total: asNumber(snapshot.total),
       counts: snapshot.counts ?? { open: 0, used: 0, expired: 0, dropped: 0 },
-      open: Array.isArray(snapshot.open) ? snapshot.open : [],
-      decisions: Array.isArray(snapshot.decisions) ? snapshot.decisions : []
+      open: Array.isArray(snapshot.open) ? snapshot.open.map(withHumanTime) : [],
+      decisions: Array.isArray(snapshot.decisions) ? snapshot.decisions.map(withHumanTime) : []
     }
   }
 
@@ -350,6 +359,8 @@ export function createInsightService(options = {}) {
         role: item.role,
         text: item.text,
         at: item.at,
+        atText: humanTime(item.at),
+        source: item.source ?? null,
         scope: item.scope,
         layer: item.layer,
         cold: item.cold === true,

@@ -314,7 +314,7 @@ function renderThoughts(snapshot) {
     item.appendChild(main)
 
     const meta = el('div', 'i-item-meta')
-    if (thought.at) meta.appendChild(el('span', '', `记于 ${clockOf(thought.at)}`))
+    if (thought.at) meta.appendChild(el('span', '', `记于 ${thought.atText || clockOf(thought.at)}`))
     if (thought.expiresAt) meta.appendChild(el('span', '', `到 ${clockOf(thought.expiresAt)} 为止`))
     meta.appendChild(el('span', '', `分量 ${Math.round((Number(thought.weight) || 0) * 100)}%`))
     item.appendChild(meta)
@@ -393,7 +393,7 @@ function renderDecisions(snapshot) {
     const meta = el('div', 'i-item-meta')
     meta.appendChild(el('span', '', scopeLabel(decision.scope)))
     if (decision.source) meta.appendChild(el('span', '', `由头：${SOURCE_LABEL[decision.source] ?? text(decision.source)}`))
-    if (decision.at) meta.appendChild(el('span', '', clockOf(decision.at)))
+    if (decision.at) meta.appendChild(el('span', '', decision.atText || clockOf(decision.at)))
     meta.appendChild(el('span', '', REASON_LABEL[decision.reason] ?? text(decision.reason)))
     if (Number(decision.hitCount) > 0) meta.appendChild(el('span', '', `撞上 ${decision.hitCount} 次`))
     item.appendChild(meta)
@@ -634,7 +634,7 @@ function renderMemoryItems() {
 
     const meta = el('div', 'i-item-meta')
     meta.appendChild(el('span', '', item.role === 'user' ? '你说的' : '她说的'))
-    if (item.at) meta.appendChild(el('span', '', clockOf(item.at)))
+    if (item.at) meta.appendChild(el('span', '', item.atText || clockOf(item.at)))
     const sourceText = memorySourceLabel(item.source)
     if (sourceText !== '') meta.appendChild(el('span', '', sourceText))
     meta.appendChild(el('span', '', scopeLabel(item.scope)))
