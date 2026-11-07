@@ -523,6 +523,8 @@ const DEFAULT_PATCH = {
     city: '',
     useWeather: true,
     quiet: { enabled: true, from: '23:00', to: '08:00', mode: 'urgentOnly', hideHud: false },
+    dailyCap: 6,
+    silenceDays: 3,
     screen: { enabled: false, consentAsked: false }
   },
   balance: { threshold: 20, intervalMinutes: 30 },
@@ -1155,6 +1157,8 @@ async function loadSettings() {
   $('presence-ai-enabled').checked = presence.aiEnabled === true
   $('presence-interval').value = String(presence.intervalMinutes ?? 45)
   $('presence-city').value = presence.city ?? ''
+  $('presence-daily-cap').value = String(presence.dailyCap ?? 6)
+  $('presence-silence-days').value = String(presence.silenceDays ?? 3)
   // 默认开着天气：这是「结合此刻」里最直观的一项。
   $('presence-weather').checked = presence.useWeather !== false
   // 识屏默认关；只有用户自己在这里打开过才会读。
@@ -2617,6 +2621,22 @@ function bindEvents() {
 
   $('presence-city').addEventListener('change', () => {
     void patch({ presence: { city: $('presence-city').value.trim() } })
+  })
+
+  // 0 表示不限次数；填错或留空时按默认值存，避免把闸门关死又不自知。
+  $('presence-daily-cap').addEventListener('change', () => {
+    const raw = Number($('presence-daily-cap').value)
+    const value = Number.isFinite(raw) ? Math.min(Math.max(Math.trunc(raw), 0), 50) : 6
+    $('presence-daily-cap').value = String(value)
+    void patch({ presence: { dailyCap: value } })
+  })
+
+  // 0 表示一直等下去；其余按天算，超过这个天数就不再自动开口。
+  $('presence-silence-days').addEventListener('change', () => {
+    const raw = Number($('presence-silence-days').value)
+    const value = Number.isFinite(raw) ? Math.min(Math.max(Math.trunc(raw), 0), 365) : 3
+    $('presence-silence-days').value = String(value)
+    void patch({ presence: { silenceDays: value } })
   })
 
   $('presence-weather').addEventListener('change', () => {

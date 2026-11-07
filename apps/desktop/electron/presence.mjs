@@ -112,6 +112,13 @@ export function timeContext(now = new Date()) {
  * 这不是一个完整的心情系统，只是把「此刻更可能是什么状态」算出来，
  * 让台词有依据。每条规则都能用一句话解释，不做黑箱打分。
  */
+/** 落盘里读回来的时间戳；格式不对就当没有。 */
+function toDateOrNull(value) {
+  if (typeof value !== 'string' || value === '') return null
+  const time = Date.parse(value)
+  return Number.isFinite(time) ? new Date(time) : null
+}
+
 export function moodSnapshot(options) {
   const { now = new Date(), sessionStartedAt = null, lastContactAt = null, balanceLow = false } = options ?? {}
   const hour = now.getHours()
@@ -494,15 +501,42 @@ export function createPresenceService(options) {
     getScreenNote = null,
     fetchImpl = globalThis.fetch,
     log = () => {},
-    now = () => new Date()
+    now = () => new Date(),
+    // 主动开口的账跨重启：调用方给读写回调，模块本身仍然不碰文件。
+    loadState = null,
+    saveState = null
   } = options
 
+  const restored = readPersistedState()
   let sessionStartedAt = now()
-  let lastContactAt = null
+  let lastContactAt = toDateOrNull(restored?.lastContactAt)
   let weatherCache = null
   const recentLines = []
   // 主动开口前的三道闸：安静时段、每日上限、连续没回应。
-  const gate = createPresenceGate({ now })
+  const gate = createPresenceGate({ now, initial: restored?.gate ?? null })
+
+  function readPersistedState() {
+    if (typeof loadState !== 'function') return null
+    try {
+      const value = loadState()
+      return value !== null && typeof value === 'object' ? value : null
+    } catch (error) {
+      log('[presence] 上次的开口账没读出来', String(error?.message ?? error))
+      return null
+    }
+  }
+
+  function persistPresence() {
+    if (typeof saveState !== 'function') return
+    try {
+      saveState({
+        lastContactAt: lastContactAt === null ? null : lastContactAt.toISOString(),
+        gate: gate.snapshot()
+      })
+    } catch (error) {
+      log('[presence] 这次的开口账没存住', String(error?.message ?? error))
+    }
+  }
 
   function readSettings() {
     return getSettings() ?? {}
@@ -542,6 +576,7 @@ export function createPresenceService(options) {
   /** 记录一次互动，供心情与「别重复」使用。 */
   function noteContact(at = now()) {
     lastContactAt = at
+    persistPresence()
   }
 
   function noteSpoken(line) {
@@ -549,6 +584,7 @@ export function createPresenceService(options) {
     recentLines.push(line.trim())
     while (recentLines.length > 5) recentLines.shift()
     gate.noteSpoken()
+    persistPresence()
   }
 
   /**

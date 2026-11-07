@@ -115,4 +115,26 @@ describe('createPresenceGate', () => {
   it('日期键是本地的年月日', () => {
     expect(dayKey(at(0, 5, 7))).toBe('2026-11-07')
   })
+
+  it('重启后接着今天的次数算，不从零开始', () => {
+    const today = dayKey(at(12, 0))
+    const room = createPresenceGate({ now: () => at(12, 0), initial: { day: today, spokenToday: 5 } })
+    expect(room.check({ reason: 'auto', settings: { presence: { dailyCap: 6 } } }).ok).toBe(true)
+
+    const capped = createPresenceGate({
+      now: () => at(12, 0),
+      initial: { day: today, spokenToday: 6 }
+    })
+    expect(capped.check({ reason: 'auto', settings: { presence: { dailyCap: 6 } } }).reason).toBe(
+      'daily-cap'
+    )
+  })
+
+  it('隔天重启，昨天的次数不带过来', () => {
+    const gate = createPresenceGate({
+      now: () => at(12, 0, 8),
+      initial: { day: '2026-11-07', spokenToday: 6 }
+    })
+    expect(gate.check({ reason: 'auto', settings: { presence: { dailyCap: 6 } } }).ok).toBe(true)
+  })
 })

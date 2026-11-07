@@ -520,6 +520,9 @@ function parsePresence(raw: unknown, base: PresenceSettings): PresenceSettings {
     city: pickText(value['city'], base.city).slice(0, 20),
     useWeather: pickBoolean(value['useWeather'], base.useWeather),
     quiet: parseQuiet(value['quiet'], base.quiet),
+    // 0 是「不限 / 不启用」，所以下限从 0 开始。
+    dailyCap: pickInt(value['dailyCap'], base.dailyCap, 0, 50),
+    silenceDays: pickInt(value['silenceDays'], base.silenceDays, 0, 365),
     outline: parseOutline(value['outline'], base.outline),
     // 识屏只认两个布尔：没写过的老设置一律当「没开、没问过」。
     screen: parseScreenRead(value['screen'], base.screen)

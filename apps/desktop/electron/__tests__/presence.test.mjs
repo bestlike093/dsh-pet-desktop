@@ -496,3 +496,44 @@ describe('nextLine 透出动作', () => {
     expect(result.motion).toBeUndefined()
   })
 })
+
+describe('开口的账跨重启', () => {
+  const settings = {
+    presence: { city: '重庆', useWeather: false, quietHours: { enabled: false }, dailyCap: 2 }
+  }
+
+  it('说过一句就把时间和次数写出去', async () => {
+    const saved = []
+    const service = createPresenceService({
+      getSettings: () => settings,
+      getApiKey: async () => '',
+      fetchImpl: async () => jsonResponse({}),
+      now: () => at(20),
+      saveState: (value) => saved.push(value)
+    })
+
+    service.noteContact(at(20))
+    await service.nextLine('auto')
+
+    const last = saved.at(-1)
+    expect(last.lastContactAt).toBe(at(20).toISOString())
+    expect(last.gate.spokenToday).toBe(1)
+  })
+
+  it('重启后接着落盘的账算，不会重新给满额', async () => {
+    const service = createPresenceService({
+      getSettings: () => settings,
+      getApiKey: async () => '',
+      fetchImpl: async () => jsonResponse({}),
+      now: () => at(21),
+      loadState: () => ({
+        lastContactAt: at(21).toISOString(),
+        gate: { day: '2026-11-01', spokenToday: 2 }
+      })
+    })
+
+    const result = await service.nextLine('auto')
+    expect(result.ok).toBe(false)
+    expect(result.reason).toBe('daily-cap')
+  })
+})

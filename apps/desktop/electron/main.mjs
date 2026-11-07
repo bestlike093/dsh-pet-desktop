@@ -1759,6 +1759,28 @@ function sendBubble(text, motion = null, meta = null) {
 }
 
 /**
+ * 主动开口的账：上次说话、今天开过几次、沉默从哪天算起。
+ *
+ * 只存时间与计数，不存内容。单独一份文件，免得被窗口位置整体覆写；
+ * 读坏了当作第一次启动，写失败也不挡这一次开口。
+ */
+const presenceStateFile = path.join(userData, 'presence-state.json')
+let presenceState = {}
+try {
+  const restoredPresence = JSON.parse(fsSync.readFileSync(presenceStateFile, 'utf8'))
+  presenceState =
+    restoredPresence !== null && typeof restoredPresence === 'object' ? restoredPresence : {}
+} catch {
+  presenceState = {}
+}
+
+function persistPresenceState(next) {
+  if (next === null || typeof next !== 'object') return
+  presenceState = next
+  void writeJson(presenceStateFile, next).catch(() => {})
+}
+
+/**
  * 主动说话的情境层。
  *
  * 和聊天服务分开：主动台词不该写进聊天历史，也不该被「正在聊天」挡住。
@@ -1796,6 +1818,9 @@ const presenceService = createPresenceService({
   // 识屏：默认关；打开后十分钟最多读一次，读到多少算多少。
   getScreenNote: readScreenNote,
   fetchImpl: (url, init) => net.fetch(url, init),
+  // 上次说话与今天开过几次要跨重启；文件和读写都留在主进程。
+  loadState: () => presenceState,
+  saveState: persistPresenceState,
   log
 })
 
@@ -4287,7 +4312,8 @@ function registerIpc() {
       rpsStatePath,
       balanceLedgerPath,
       path.join(userData, 'game-daily.json'),
-      path.join(userData, 'game-assistant.json')
+      path.join(userData, 'game-assistant.json'),
+      presenceStateFile
     ]
     for (const file of residualFiles) {
       await fs.rm(file, { force: true }).catch(() => undefined)

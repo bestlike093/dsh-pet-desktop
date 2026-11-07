@@ -1018,6 +1018,22 @@
 
           <div class="item">
             <div class="item-text">
+              <div class="item-label" data-i18n="presence.dailyCap">每天最多主动说几句</div>
+              <div class="item-hint" data-i18n="presence.dailyCapHint">0 表示不限；你自己点她说话不算在这几次里</div>
+            </div>
+            <input id="presence-daily-cap" type="number" min="0" max="50" step="1" />
+          </div>
+
+          <div class="item">
+            <div class="item-text">
+              <div class="item-label" data-i18n="presence.silenceDays">几天没聊就安静下来</div>
+              <div class="item-hint" data-i18n="presence.silenceDaysHint">0 表示一直等；重新聊过一句就从头算</div>
+            </div>
+            <input id="presence-silence-days" type="number" min="0" max="365" step="1" />
+          </div>
+
+          <div class="item">
+            <div class="item-text">
               <div class="item-label" data-i18n="presence.city">天气城市</div>
               <div class="item-hint" data-i18n="presence.cityHint">
                 支持常见城市名；不认识的名字按默认城市取天气，不会报错

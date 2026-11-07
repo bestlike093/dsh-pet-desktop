@@ -256,6 +256,10 @@ export interface PresenceSettings {
   readonly useWeather: boolean
   /** 夜间不扰：时段与处理方式都由使用者自己定。 */
   readonly quiet: QuietHoursSettings
+  /** 每天最多主动开口几次；0 = 不限。手动点她不受这条限制。 */
+  readonly dailyCap: number
+  /** 连续多少天没互动就不再自动开口；0 = 一直等下去。 */
+  readonly silenceDays: number
   /** 立绘描边：light=白边（默认），dark=深边，auto=按亮度自动挑。 */
   readonly outline: 'auto' | 'light' | 'dark'
   /** 识屏：默认关，问过一次之后再打开才读。 */
@@ -450,6 +454,9 @@ export const DEFAULT_SETTINGS: SettingsV2 = {
     useWeather: true,
     // 默认开启：23:00–08:00 只关搭话、保留定时提醒。
     quiet: { enabled: true, from: '23:00', to: '08:00', mode: 'urgentOnly', hideHud: false },
+    // 三条闸的默认值：一天最多 6 次，连着 3 天没互动就不再主动开口。
+    dailyCap: 6,
+    silenceDays: 3,
     // 立绘描边默认白边：浅色桌面也要看得清轮廓。
     outline: 'light',
     // 识屏默认关：没问过也不读，拒绝过一次也不会偷偷打开。

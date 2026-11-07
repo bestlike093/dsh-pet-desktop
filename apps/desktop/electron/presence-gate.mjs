@@ -44,9 +44,13 @@ export function inQuietHours(now = new Date(), quiet = DEFAULT_QUIET) {
     : current >= start || current < end
 }
 
-export function createPresenceGate({ now = () => new Date() } = {}) {
-  let today = ''
-  let spokenToday = 0
+export function createPresenceGate({ now = () => new Date(), initial = null } = {}) {
+  // 从上一轮运行接过来的账。日期不是今天时，第一次 rollDay 会自然清零。
+  let today = typeof initial?.day === 'string' ? initial.day : ''
+  let spokenToday =
+    Number.isFinite(initial?.spokenToday) && initial.spokenToday > 0
+      ? Math.floor(initial.spokenToday)
+      : 0
 
   function rollDay(nowDate) {
     const key = dayKey(nowDate)
