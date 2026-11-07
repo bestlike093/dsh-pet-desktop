@@ -77,8 +77,23 @@ export function humanDay(stamp, now = Date.now()) {
   return `${prefix}${date.getMonth() + 1} 月${monthPhase(date.getDate())}`
 }
 
+/** 一天里的说法规矩：口语里先说到时段，再说到钟点。 */
+function periodOf(hour) {
+  if (hour < 5) return '凌晨'
+  if (hour < 9) return '早上'
+  if (hour < 12) return '上午'
+  if (hour < 14) return '中午'
+  if (hour < 18) return '下午'
+  if (hour < 20) return '傍晚'
+  return '晚上'
+}
+
+/** 这些日子离得近，钟点和时段一起说才像人话。 */
+const NEAR_DAYS = new Set(['今天', '昨天', '前天', '大前天', '明天', '后天', '大后天'])
+
 /**
- * 「前天 21:40」这种说法。
+ * 「今天早上 8:03」「昨晚 11:05」这种说法。
+ * 远一点的日子仍然带 24 小时制时刻，看得清又不绕。
  * @param {number|string} stamp 目标时间（毫秒）
  * @param {number} now 参照时间（毫秒），默认现在
  */
@@ -87,8 +102,17 @@ export function humanTime(stamp, now = Date.now()) {
   if (ms === 0) return ''
   const day = humanDay(ms, now)
   if (day === '') return ''
+
   const date = new Date(ms)
-  const hour = String(date.getHours()).padStart(2, '0')
+  const hour = date.getHours()
   const minute = String(date.getMinutes()).padStart(2, '0')
-  return `${day} ${hour}:${minute}`
+  if (!NEAR_DAYS.has(day)) {
+    return `${day} ${String(hour).padStart(2, '0')}:${minute}`
+  }
+
+  const period = periodOf(hour)
+  const clock = `${hour % 12 === 0 ? 12 : hour % 12}:${minute}`
+  // 「昨天 + 晚上」说成「昨晚」，其余照常拼。
+  const head = day === '昨天' && period === '晚上' ? '昨晚' : `${day}${period}`
+  return `${head} ${clock}`
 }

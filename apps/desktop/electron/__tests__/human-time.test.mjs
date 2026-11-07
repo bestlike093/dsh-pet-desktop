@@ -46,12 +46,21 @@ describe('human-day 把日期说成人话', () => {
 })
 
 describe('human-time 带上时刻', () => {
-  it('近几天是「前天 09:05」这种说法', () => {
-    expect(humanTime(at(11, 5, 21, 40), NOW)).toBe('前天 21:40')
-    expect(humanTime(at(11, 7, 8, 3), NOW)).toBe('今天 08:03')
+  it('近几天按时段说，钟点用十二小时制', () => {
+    expect(humanTime(at(11, 7, 4, 30), NOW)).toBe('今天凌晨 4:30')
+    expect(humanTime(at(11, 7, 8, 3), NOW)).toBe('今天早上 8:03')
+    expect(humanTime(at(11, 7, 10, 15), NOW)).toBe('今天上午 10:15')
+    expect(humanTime(at(11, 7, 12, 0), NOW)).toBe('今天中午 12:00')
+    expect(humanTime(at(11, 6, 15, 20), NOW)).toBe('昨天下午 3:20')
+    expect(humanTime(at(11, 6, 18, 40), NOW)).toBe('昨天傍晚 6:40')
   })
 
-  it('远一点的日子仍然带时刻', () => {
+  it('昨天夜里说成「昨晚」', () => {
+    expect(humanTime(at(11, 6, 23, 5), NOW)).toBe('昨晚 11:05')
+    expect(humanTime(at(11, 5, 21, 40), NOW)).toBe('前天晚上 9:40')
+  })
+
+  it('远一点的日子仍然带二十四小时制时刻', () => {
     expect(humanTime(at(10, 28, 23, 59), NOW)).toBe('上周三 23:59')
   })
 
