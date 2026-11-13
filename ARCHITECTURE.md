@@ -144,7 +144,7 @@ stateDiagram-v2
 
 Live2D 加载失败时降级为静态图，不把错误抛到窗口层。未知 kind 抛 `MODEL_NOT_RENDERABLE`。
 
-启动时若没有选中模型，主界面先用 `assets/whale-girl-stand` 的随包立绘，不把窗口留空；立绘也读不到时才停在空态引导卡。
+启动时若没有选中模型，主界面先用 `assets/cyrene/stand/default.png` 的随包立绘，不把窗口留空；立绘也读不到时才停在空态引导卡。
 
 ## 2D 形象与两条通道
 
